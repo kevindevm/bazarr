@@ -255,11 +255,7 @@ class TuSubtituloProvider(Provider):
         return []
 
     def list_subtitles(self, video, languages):
-        # return self.query(video)
-
-        # returning no subtitles automatically to prevent requests to the provider who explicitly requested to be
-        # removed in https://github.com/morpheus65535/bazarr/issues/1591
-        return []
+        return self.query(video)
 
     @staticmethod
     def _check_response(response):
