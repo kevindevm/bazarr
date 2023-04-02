@@ -1,46 +1,61 @@
+import { Selector } from "@/components";
+import { useModals, withModal } from "@/modules/modals";
+import { BuildKey, useSelectorOptions } from "@/utilities";
+import { ASSERT } from "@/utilities/console";
 import {
-  BaseModal,
-  Selector,
-  useModalInformation,
-  useOnModalShow,
-  useShowModal,
-} from "components";
-import { capitalize, isArray, isBoolean } from "lodash";
-import React, {
+  Button,
+  Divider,
+  Group,
+  SimpleGrid,
+  Stack,
+  Text as MantineText,
+} from "@mantine/core";
+import { useForm } from "@mantine/form";
+import { capitalize } from "lodash";
+import {
+  forwardRef,
   FunctionComponent,
   useCallback,
-  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
-import { Button, Col, Container, Row } from "react-bootstrap";
-import { components } from "react-select";
-import { SelectComponents } from "react-select/dist/declarations/src/components";
-import { BuildKey, isReactText } from "utilities";
+import { Card, Check, Chips, Message, Password, Text } from "../components";
 import {
-  Check,
-  ColCard,
-  Message,
-  StagedChangesContext,
-  Text,
-  useLatest,
-  useMultiUpdate,
-} from "../components";
+  FormContext,
+  FormValues,
+  runHooks,
+  useFormActions,
+  useStagedValues,
+} from "../utilities/FormValues";
+import { useSettingValue } from "../utilities/hooks";
+import { SettingsProvider, useSettings } from "../utilities/SettingsProvider";
 import { ProviderInfo, ProviderList } from "./list";
 
-const ModalKey = "provider-modal";
 const ProviderKey = "settings-general-enabled_providers";
 
 export const ProviderView: FunctionComponent = () => {
-  const providers = useLatest<string[]>(ProviderKey, isArray);
+  const settings = useSettings();
+  const staged = useStagedValues();
+  const providers = useSettingValue<string[]>(ProviderKey);
 
-  const showModal = useShowModal();
+  const { update } = useFormActions();
+
+  const modals = useModals();
 
   const select = useCallback(
     (v?: ProviderInfo) => {
-      showModal(ModalKey, v ?? null);
+      if (settings) {
+        modals.openContextModal(ProviderModal, {
+          payload: v ?? null,
+          enabledProviders: providers ?? [],
+          staged,
+          settings,
+          onChange: update,
+        });
+      }
     },
-    [showModal]
+    [modals, providers, settings, staged, update]
   );
 
   const cards = useMemo(() => {
@@ -55,12 +70,12 @@ export const ProviderView: FunctionComponent = () => {
           }
         })
         .map((v, idx) => (
-          <ColCard
-            key={BuildKey(idx, v.name)}
+          <Card
+            key={BuildKey(v.key, idx)}
             header={v.name ?? capitalize(v.key)}
-            subheader={v.description}
+            description={v.description}
             onClick={() => select(v)}
-          ></ColCard>
+          ></Card>
         ));
     } else {
       return [];
@@ -68,74 +83,90 @@ export const ProviderView: FunctionComponent = () => {
   }, [providers, select]);
 
   return (
-    <Container fluid>
-      <Row>
-        {cards}
-        <ColCard key="add-card" plus onClick={select}></ColCard>
-      </Row>
-    </Container>
+    <SimpleGrid cols={3}>
+      {cards}
+      <Card plus onClick={() => select()}></Card>
+    </SimpleGrid>
   );
 };
 
-export const ProviderModal: FunctionComponent = () => {
-  const { payload, closeModal } = useModalInformation<ProviderInfo>(ModalKey);
+interface ProviderToolProps {
+  payload: ProviderInfo | null;
+  // TODO: Find a better solution to pass this info to modal
+  enabledProviders: readonly string[];
+  staged: LooseObject;
+  settings: Settings;
+  onChange: (v: LooseObject) => void;
+}
 
-  const [staged, setChange] = useState<LooseObject>({});
+const SelectItem = forwardRef<
+  HTMLDivElement,
+  { payload: ProviderInfo; label: string }
+>(({ payload: { description }, label, ...other }, ref) => {
+  return (
+    <Stack spacing={1} ref={ref} {...other}>
+      <MantineText size="md">{label}</MantineText>
+      <MantineText size="xs">{description}</MantineText>
+    </Stack>
+  );
+});
 
-  useEffect(() => {
-    setInfo(payload);
-  }, [payload]);
+const ProviderTool: FunctionComponent<ProviderToolProps> = ({
+  payload,
+  enabledProviders,
+  staged,
+  settings,
+  onChange,
+}) => {
+  const modals = useModals();
+
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
 
   const [info, setInfo] = useState<Nullable<ProviderInfo>>(payload);
 
-  useOnModalShow<ProviderInfo>((p) => setInfo(p), ModalKey);
-
-  const providers = useLatest<string[]>(ProviderKey, isArray);
-
-  const updateGlobal = useMultiUpdate();
+  const form = useForm<FormValues>({
+    initialValues: {
+      settings: staged,
+      hooks: {},
+    },
+  });
 
   const deletePayload = useCallback(() => {
-    if (payload && providers) {
-      const idx = providers.findIndex((v) => v === payload.key);
+    if (payload && enabledProviders) {
+      const idx = enabledProviders.findIndex((v) => v === payload.key);
       if (idx !== -1) {
-        const newProviders = [...providers];
+        const newProviders = [...enabledProviders];
         newProviders.splice(idx, 1);
-        updateGlobal({ [ProviderKey]: newProviders });
-        closeModal();
+        onChangeRef.current({ [ProviderKey]: newProviders });
+        modals.closeAll();
       }
     }
-  }, [payload, providers, updateGlobal, closeModal]);
+  }, [payload, enabledProviders, modals]);
 
-  const addProvider = useCallback(() => {
-    if (info && providers) {
-      const changes = { ...staged };
+  const submit = useCallback(
+    (values: FormValues) => {
+      if (info && enabledProviders) {
+        const changes = { ...values.settings };
+        const hooks = values.hooks;
 
-      // Add this provider if not exist
-      if (providers.find((v) => v === info.key) === undefined) {
-        const newProviders = [...providers, info.key];
-        changes[ProviderKey] = newProviders;
+        // Add this provider if not exist
+        if (enabledProviders.find((v) => v === info.key) === undefined) {
+          const newProviders = [...enabledProviders, info.key];
+          changes[ProviderKey] = newProviders;
+        }
+
+        // Apply submit hooks
+        runHooks(hooks, changes);
+
+        onChangeRef.current(changes);
+        modals.closeAll();
       }
-
-      updateGlobal(changes);
-      closeModal();
-    }
-  }, [info, providers, staged, closeModal, updateGlobal]);
+    },
+    [info, enabledProviders, modals]
+  );
 
   const canSave = info !== null;
-
-  const footer = useMemo(
-    () => (
-      <React.Fragment>
-        <Button hidden={!payload} variant="danger" onClick={deletePayload}>
-          Delete
-        </Button>
-        <Button disabled={!canSave} onClick={addProvider}>
-          Save
-        </Button>
-      </React.Fragment>
-    ),
-    [canSave, payload, deletePayload, addProvider]
-  );
 
   const onSelect = useCallback((item: Nullable<ProviderInfo>) => {
     if (item) {
@@ -148,127 +179,120 @@ export const ProviderModal: FunctionComponent = () => {
     }
   }, []);
 
-  const options = useMemo<SelectorOption<ProviderInfo>[]>(
+  const availableOptions = useMemo(
     () =>
       ProviderList.filter(
-        (v) => providers?.find((p) => p === v.key) === undefined
-      ).map((v) => ({
-        label: v.name ?? capitalize(v.key),
-        value: v,
-      })),
-    [providers]
+        (v) =>
+          enabledProviders?.find((p) => p === v.key && p !== info?.key) ===
+          undefined
+      ),
+    [info?.key, enabledProviders]
   );
 
-  const modification = useMemo(() => {
-    if (info === null) {
-      return null;
-    }
+  const options = useSelectorOptions(
+    availableOptions,
+    (v) => v.name ?? capitalize(v.key)
+  );
 
-    const defaultKey = info.defaultKey;
-    const override = info.keyNameOverride ?? {};
-    if (defaultKey === undefined) {
+  const inputs = useMemo(() => {
+    if (info === null || info.inputs === undefined) {
       return null;
     }
 
     const itemKey = info.key;
 
     const elements: JSX.Element[] = [];
-    const checks: JSX.Element[] = [];
 
-    for (const key in defaultKey) {
-      const value = defaultKey[key];
-      let visibleKey = key;
+    info.inputs?.forEach((value) => {
+      const key = value.key;
+      const label = value.name ?? capitalize(value.key);
 
-      if (visibleKey in override) {
-        visibleKey = override[visibleKey];
-      } else {
-        visibleKey = capitalize(key);
-      }
-
-      if (isReactText(value)) {
-        elements.push(
-          <Col key={key} xs={12} className="mt-2">
+      switch (value.type) {
+        case "text":
+          elements.push(
             <Text
-              password={key === "password"}
-              placeholder={visibleKey}
+              key={BuildKey(itemKey, key)}
+              label={label}
               settingKey={`settings-${itemKey}-${key}`}
             ></Text>
-          </Col>
-        );
-      } else if (isBoolean(value)) {
-        checks.push(
-          <Check
-            key={key}
-            inline
-            label={visibleKey}
-            settingKey={`settings-${itemKey}-${key}`}
-          ></Check>
-        );
+          );
+          return;
+        case "password":
+          elements.push(
+            <Password
+              key={BuildKey(itemKey, key)}
+              label={label}
+              settingKey={`settings-${itemKey}-${key}`}
+            ></Password>
+          );
+          return;
+        case "switch":
+          elements.push(
+            <Check
+              key={key}
+              inline
+              label={label}
+              settingKey={`settings-${itemKey}-${key}`}
+            ></Check>
+          );
+          return;
+        case "chips":
+          elements.push(
+            <Chips
+              key={key}
+              label={label}
+              settingKey={`settings-${itemKey}-${key}`}
+            ></Chips>
+          );
+          return;
+        default:
+          ASSERT(false, "Implement your new input here");
       }
-    }
+    });
 
-    return (
-      <Row>
-        {elements}
-        <Col hidden={checks.length === 0} className="mt-2">
-          {checks}
-        </Col>
-      </Row>
-    );
+    return <Stack spacing="xs">{elements}</Stack>;
   }, [info]);
 
-  const selectorComponents = useMemo<
-    Partial<SelectComponents<ProviderInfo, false, any>>
-  >(
-    () => ({
-      Option: ({ data, ...other }) => {
-        const { label, value } =
-          data as unknown as SelectorOption<ProviderInfo>;
-        return (
-          <components.Option data={data} {...other}>
-            {label}
-            <p className="small m-0 text-muted">{value.description}</p>
-          </components.Option>
-        );
-      },
-    }),
-    []
-  );
-
-  const getLabel = useCallback(
-    (v: ProviderInfo) => v.name ?? capitalize(v.key),
-    []
-  );
-
   return (
-    <BaseModal title="Provider" footer={footer} modalKey={ModalKey}>
-      <StagedChangesContext.Provider value={[staged, setChange]}>
-        <Container>
-          <Row>
-            <Col>
-              <Selector
-                components={selectorComponents}
-                disabled={payload !== null}
-                options={options}
-                value={info}
-                label={getLabel}
-                onChange={onSelect}
-              ></Selector>
-            </Col>
-          </Row>
-          <Row>
-            <Col className="mb-2">
-              <Message>{info?.description}</Message>
-            </Col>
-          </Row>
-          {modification}
-          <Row hidden={info?.message === undefined}>
-            <Col>
+    <SettingsProvider value={settings}>
+      <FormContext.Provider value={form}>
+        <Stack>
+          <Stack spacing="xs">
+            <Selector
+              searchable
+              placeholder="Click to Select a Provider"
+              itemComponent={SelectItem}
+              disabled={payload !== null}
+              {...options}
+              value={info}
+              onChange={onSelect}
+            ></Selector>
+            <Message>{info?.description}</Message>
+            {inputs}
+            <div hidden={info?.message === undefined}>
               <Message>{info?.message}</Message>
-            </Col>
-          </Row>
-        </Container>
-      </StagedChangesContext.Provider>
-    </BaseModal>
+            </div>
+          </Stack>
+          <Divider></Divider>
+          <Group position="right">
+            <Button hidden={!payload} color="red" onClick={deletePayload}>
+              Delete
+            </Button>
+            <Button
+              disabled={!canSave}
+              onClick={() => {
+                submit(form.values);
+              }}
+            >
+              Save
+            </Button>
+          </Group>
+        </Stack>
+      </FormContext.Provider>
+    </SettingsProvider>
   );
 };
+
+const ProviderModal = withModal(ProviderTool, "provider-tool", {
+  title: "Provider",
+});

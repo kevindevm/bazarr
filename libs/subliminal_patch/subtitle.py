@@ -61,8 +61,10 @@ class Subtitle(Subtitle_):
     pack_data = None
     _guessed_encoding = None
     _is_valid = False
+    use_original_format = False
+    format = "srt" # default format is srt
 
-    def __init__(self, language, hearing_impaired=False, page_link=None, encoding=None, mods=None):
+    def __init__(self, language, hearing_impaired=False, page_link=None, encoding=None, mods=None, original_format=False):
         # set subtitle language to hi if it's hearing_impaired
         if hearing_impaired:
             language = Language.rebuild(language, hi=True)
@@ -71,6 +73,7 @@ class Subtitle(Subtitle_):
                                        encoding=encoding)
         self.mods = mods
         self._is_valid = False
+        self.use_original_format = original_format
 
     def __repr__(self):
         return '<%s %r [%s:%s]>' % (
@@ -257,7 +260,7 @@ class Subtitle(Subtitle_):
         return encoding
 
     def is_valid(self):
-        """Check if a :attr:`text` is a valid SubRip format.
+        """Check if a :attr:`text` is a valid SubRip format. Note that orignal format will pypass the checking
 
         :return: whether or not the subtitle is valid.
         :rtype: bool
@@ -289,6 +292,12 @@ class Subtitle(Subtitle_):
                     logger.info("Got FPS from MicroDVD subtitle: %s", subs.fps)
                 else:
                     logger.info("Got format: %s", subs.format)
+                    if self.use_original_format:
+                        self.format = subs.format
+                        self._is_valid = True
+                        logger.debug("Using original format")
+                        return True
+
             except pysubs2.UnknownFPSError:
                 # if parsing failed, use frame rate from provider
                 sub_fps = self.get_fps()
@@ -471,8 +480,12 @@ def guess_matches(video, guess, partial=False):
         # Most providers only support single-ep, so make sure it contains only 1 episode
         # In case of multi-ep, take the lowest episode (subtitles will normally be available on lowest episode number)
         if video.episode and 'episode' in guess:
-            episode_guess = guess['episode']
-            episode = min(episode_guess) if episode_guess and isinstance(episode_guess, list) else episode_guess
+            episode = episode_guess = guess['episode']
+            if isinstance(episode_guess, list):
+                try:
+                    episode = min([int(x) for x in episode_guess])
+                except (TypeError, ValueError):
+                    pass
             if episode == video.episode:
                 matches.add('episode')
 
@@ -539,12 +552,23 @@ def guess_matches(video, guess, partial=False):
         if _has_match(video, guess, key):
             matches.add(key)
 
-    # Add streaming service match for non-web sources
-    if video.source and video.source != "Web":
-        matches.add("streaming_service")
-
-    # As edition tags are rare, add edition match if the video doesn't have an edition
-    if not video.edition:
-        matches.add("edition")
+    for key in ("streaming_service", "edition", "other"):
+        if _check_optional(video, guess, key):
+            matches.add(key)
 
     return matches
+
+
+def _check_optional(video, guess, key="edition"):
+    guess_optional = guess.get(key)
+    video_optional = getattr(video, key, None)
+
+    if video_optional and guess_optional:
+        return _has_match(video, guess, key)
+
+    if not video_optional and not guess_optional:
+        logger.debug("Both video and guess don't have %s. Returning True", key)
+        return True
+
+    logger.debug("One item doesn't have %s (%s -> %s). Returning False", key, guess_optional, video_optional)
+    return False

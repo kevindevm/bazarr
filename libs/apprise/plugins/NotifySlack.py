@@ -94,7 +94,7 @@ SLACK_HTTP_ERROR_MAP = {
 CHANNEL_LIST_DELIM = re.compile(r'[ \t\r\n,#\\/]+')
 
 
-class SlackMode(object):
+class SlackMode:
     """
     Tracks the mode of which we're using Slack
     """
@@ -315,10 +315,6 @@ class NotifySlack(NotifyBase):
                       '({}) was specified.'.format(access_token)
                 self.logger.warning(msg)
                 raise TypeError(msg)
-
-        if not self.user:
-            self.logger.warning(
-                'No user was specified; using "%s".' % self.app_id)
 
         # Look the users up by their email address and map them back to their
         # id here for future queries (if needed). This allows people to

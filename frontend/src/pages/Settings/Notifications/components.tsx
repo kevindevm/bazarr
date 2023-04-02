@@ -1,41 +1,124 @@
-import api from "apis/raw";
+import api from "@/apis/raw";
+import { Selector } from "@/components";
+import MutateButton from "@/components/async/MutateButton";
+import { useModals, withModal } from "@/modules/modals";
+import { BuildKey, useSelectorOptions } from "@/utilities";
+import FormUtils from "@/utilities/form";
 import {
-  AsyncButton,
-  BaseModal,
-  BaseModalProps,
-  Selector,
-  useModalInformation,
-  useOnModalShow,
-  useShowModal,
-} from "components";
-import React, {
-  FunctionComponent,
-  useCallback,
-  useMemo,
-  useState,
-} from "react";
-import { Button, Col, Container, Form, Row } from "react-bootstrap";
-import { BuildKey } from "utilities";
-import { ColCard, useLatestArray, useUpdateArray } from "../components";
+  Button,
+  Divider,
+  Group,
+  SimpleGrid,
+  Stack,
+  Textarea,
+} from "@mantine/core";
+import { useForm } from "@mantine/form";
+import { isObject } from "lodash";
+import { FunctionComponent, useCallback, useMemo } from "react";
+import { useMutation } from "react-query";
+import { Card } from "../components";
 import { notificationsKey } from "../keys";
+import { useSettingValue, useUpdateArray } from "../utilities/hooks";
 
-interface ModalProps {
+const notificationHook = (notifications: Settings.NotificationInfo[]) => {
+  return notifications.map((info) => JSON.stringify(info));
+};
+
+interface Props {
   selections: readonly Settings.NotificationInfo[];
+  payload: Settings.NotificationInfo | null;
+  onComplete: (info: Settings.NotificationInfo) => void;
 }
 
-const NotificationModal: FunctionComponent<ModalProps & BaseModalProps> = ({
+const NotificationForm: FunctionComponent<Props> = ({
   selections,
-  ...modal
+  payload,
+  onComplete,
 }) => {
-  const options = useMemo<SelectorOption<Settings.NotificationInfo>[]>(
-    () =>
-      selections
-        .filter((v) => !v.enabled)
-        .map((v) => ({
-          label: v.name,
-          value: v,
-        })),
-    [selections]
+  const availableSelections = useMemo(
+    () => selections.filter((v) => !v.enabled || v.name === payload?.name),
+    [payload?.name, selections]
+  );
+  const options = useSelectorOptions(availableSelections, (v) => v.name);
+
+  const modals = useModals();
+
+  const form = useForm({
+    initialValues: {
+      selection: payload,
+      url: payload?.url ?? "",
+    },
+    validate: {
+      selection: FormUtils.validation(
+        isObject,
+        "Please select a notification provider"
+      ),
+      url: FormUtils.validation(
+        (value) => value.trim().length !== 0,
+        "URL must not be empty"
+      ),
+    },
+  });
+
+  const test = useMutation((url: string) => api.system.testNotification(url));
+
+  return (
+    <form
+      onSubmit={form.onSubmit(({ selection, url }) => {
+        if (selection) {
+          onComplete({ ...selection, enabled: true, url });
+        }
+        modals.closeSelf();
+      })}
+    >
+      <Stack>
+        <Selector
+          disabled={payload !== null}
+          {...options}
+          {...form.getInputProps("selection")}
+        ></Selector>
+        <div hidden={form.values.selection === null}>
+          <Textarea
+            minRows={4}
+            placeholder="URL"
+            {...form.getInputProps("url")}
+          ></Textarea>
+        </div>
+        <Divider></Divider>
+        <Group position="right">
+          <MutateButton mutation={test} args={() => form.values.url}>
+            Test
+          </MutateButton>
+          <Button
+            hidden={payload === null}
+            color="red"
+            onClick={() => {
+              if (payload) {
+                onComplete({ ...payload, enabled: false });
+              }
+              modals.closeAll();
+            }}
+          >
+            Remove
+          </Button>
+          <Button type="submit">Save</Button>
+        </Group>
+      </Stack>
+    </form>
+  );
+};
+
+const NotificationModal = withModal(NotificationForm, "notification-tool", {
+  title: "Notification",
+});
+
+export const NotificationView: FunctionComponent = () => {
+  const notifications = useSettingValue<Settings.NotificationInfo[]>(
+    notificationsKey,
+    {
+      onLoaded: (settings) => settings.notifications.providers,
+      onSubmit: (value) => value.map((v) => JSON.stringify(v)),
+    }
   );
 
   const update = useUpdateArray<Settings.NotificationInfo>(
@@ -43,144 +126,46 @@ const NotificationModal: FunctionComponent<ModalProps & BaseModalProps> = ({
     "name"
   );
 
-  const { payload, closeModal } =
-    useModalInformation<Settings.NotificationInfo>(modal.modalKey);
-
-  const [current, setCurrent] =
-    useState<Nullable<Settings.NotificationInfo>>(payload);
-
-  useOnModalShow<Settings.NotificationInfo>(
-    (p) => setCurrent(p),
-    modal.modalKey
+  const updateWrapper = useCallback(
+    (info: Settings.NotificationInfo) => {
+      update(info, notificationHook);
+    },
+    [update]
   );
 
-  const updateUrl = useCallback((url: string) => {
-    setCurrent((current) => {
-      if (current) {
-        return {
-          ...current,
-          url,
-        };
-      } else {
-        return current;
-      }
-    });
-  }, []);
-
-  const canSave =
-    current !== null && current?.url !== null && current?.url.length !== 0;
-
-  const footer = useMemo(
-    () => (
-      <React.Fragment>
-        <AsyncButton
-          className="mr-auto"
-          disabled={!canSave}
-          variant="outline-secondary"
-          promise={() => {
-            if (current && current.url) {
-              return api.system.testNotification(current.url);
-            } else {
-              return null;
-            }
-          }}
-        >
-          Test
-        </AsyncButton>
-        <Button
-          hidden={payload === null}
-          variant="danger"
-          onClick={() => {
-            if (current) {
-              update({ ...current, enabled: false });
-            }
-            closeModal();
-          }}
-        >
-          Remove
-        </Button>
-        <Button
-          disabled={!canSave}
-          onClick={() => {
-            if (current) {
-              update({ ...current, enabled: true });
-            }
-            closeModal();
-          }}
-        >
-          Save
-        </Button>
-      </React.Fragment>
-    ),
-    [canSave, closeModal, current, update, payload]
-  );
-
-  const getLabel = useCallback((v: Settings.NotificationInfo) => v.name, []);
-
-  return (
-    <BaseModal title="Notification" footer={footer} {...modal}>
-      <Container fluid>
-        <Row>
-          <Col xs={12}>
-            <Selector
-              disabled={payload !== null}
-              options={options}
-              value={current}
-              onChange={setCurrent}
-              label={getLabel}
-            ></Selector>
-          </Col>
-          <Col hidden={current === null}>
-            <Form.Group className="mt-4">
-              <Form.Control
-                as="textarea"
-                rows={4}
-                placeholder="URL"
-                value={current?.url ?? ""}
-                onChange={(e) => {
-                  const value = e.currentTarget.value;
-                  updateUrl(value);
-                }}
-              ></Form.Control>
-            </Form.Group>
-          </Col>
-        </Row>
-      </Container>
-    </BaseModal>
-  );
-};
-
-export const NotificationView: FunctionComponent = () => {
-  const notifications = useLatestArray<Settings.NotificationInfo>(
-    notificationsKey,
-    "name",
-    (s) => s.notifications.providers
-  );
-
-  const showModal = useShowModal();
+  const modals = useModals();
 
   const elements = useMemo(() => {
     return notifications
       ?.filter((v) => v.enabled)
-      .map((v, idx) => (
-        <ColCard
-          key={BuildKey(idx, v.name)}
-          header={v.name}
-          onClick={() => showModal("notifications", v)}
-        ></ColCard>
+      .map((payload, idx) => (
+        <Card
+          key={BuildKey(idx, payload.name)}
+          header={payload.name}
+          onClick={() =>
+            modals.openContextModal(NotificationModal, {
+              payload,
+              selections: notifications,
+              onComplete: updateWrapper,
+            })
+          }
+        ></Card>
       ));
-  }, [notifications, showModal]);
+  }, [modals, notifications, updateWrapper]);
 
   return (
-    <Container fluid>
-      <Row>
-        {elements}{" "}
-        <ColCard plus onClick={() => showModal("notifications")}></ColCard>
-      </Row>
-      <NotificationModal
-        selections={notifications ?? []}
-        modalKey="notifications"
-      ></NotificationModal>
-    </Container>
+    <SimpleGrid cols={3}>
+      {elements}
+      <Card
+        plus
+        onClick={() =>
+          modals.openContextModal(NotificationModal, {
+            payload: null,
+            selections: notifications ?? [],
+            onComplete: updateWrapper,
+          })
+        }
+      ></Card>
+    </SimpleGrid>
   );
 };

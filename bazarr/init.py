@@ -2,20 +2,22 @@
 
 import os
 import io
-import rarfile
 import sys
 import subprocess
-
-from config import settings, configure_captcha_func
-from get_args import args
-from logger import configure_logging
-from helper import path_mappings
-from backup import restore_from_backup
-
-from dogpile.cache.region import register_backend as register_cache_backend
 import subliminal
 import datetime
 import time
+import rarfile
+
+from dogpile.cache.region import register_backend as register_cache_backend
+from subliminal_patch.extensions import provider_registry
+
+from app.config import settings, configure_captcha_func, get_array_from
+from app.get_args import args
+from app.logger import configure_logging
+from utilities.binaries import get_binary, BinaryNotFound
+from utilities.path_mappings import path_mappings
+from utilities.backup import restore_from_backup
 
 # set start time global variable as epoch
 global startTime
@@ -26,12 +28,6 @@ restore_from_backup()
 
 # set subliminal_patch user agent
 os.environ["SZ_USER_AGENT"] = "Bazarr/{}".format(os.environ["BAZARR_VERSION"])
-
-# set subliminal_patch hearing-impaired extension to use when naming subtitles
-os.environ["SZ_HI_EXTENSION"] = settings.general.hi_extension
-
-# set anti-captcha provider and key
-configure_captcha_func()
 
 # Check if args.config_dir exist
 if not os.path.exists(args.config_dir):
@@ -50,9 +46,21 @@ if not os.path.exists(os.path.join(args.config_dir, 'log')):
     os.mkdir(os.path.join(args.config_dir, 'log'))
 if not os.path.exists(os.path.join(args.config_dir, 'cache')):
     os.mkdir(os.path.join(args.config_dir, 'cache'))
+if not os.path.exists(os.path.join(args.config_dir, 'backup')):
+    os.mkdir(os.path.join(args.config_dir, 'backup'))
 if not os.path.exists(os.path.join(args.config_dir, 'restore')):
     os.mkdir(os.path.join(args.config_dir, 'restore'))
 
+# set subliminal_patch hearing-impaired extension to use when naming subtitles
+os.environ["SZ_HI_EXTENSION"] = settings.general.hi_extension
+
+# set anti-captcha provider and key
+configure_captcha_func()
+
+# import Google Analytics module to make sure logging is properly configured afterwards
+from ga4mp import GtagMP  # noqa E402
+
+# configure logging
 configure_logging(settings.general.getboolean('debug') or args.debug)
 import logging  # noqa E402
 
@@ -60,7 +68,7 @@ import logging  # noqa E402
 def is_virtualenv():
     # return True if Bazarr have been start from within a virtualenv or venv
     base_prefix = getattr(sys, "base_prefix", None)
-    # real_prefix will return None if not in a virtualenv enviroment or the default python path
+    # real_prefix will return None if not in a virtualenv environment or the default python path
     real_prefix = getattr(sys, "real_prefix", None) or sys.prefix
     return base_prefix != real_prefix
 
@@ -95,7 +103,7 @@ if not args.no_update:
                 try:
                     restart_file = io.open(os.path.join(args.config_dir, "bazarr.restart"), "w", encoding='UTF-8')
                 except Exception as e:
-                    logging.error('BAZARR Cannot create bazarr.restart file: ' + repr(e))
+                    logging.error('BAZARR Cannot create restart file: ' + repr(e))
                 else:
                     logging.info('Bazarr is being restarted...')
                     restart_file.write(str(''))
@@ -163,13 +171,19 @@ if os.path.isfile(package_info_file):
 # Configure dogpile file caching for Subliminal request
 register_cache_backend("subzero.cache.file", "subzero.cache_backends.file", "SZFileBackend")
 subliminal.region.configure('subzero.cache.file', expiration_time=datetime.timedelta(days=30),
-                            arguments={'appname': "sz_cache", 'app_cache_dir': args.config_dir})
+                            arguments={'appname': "sz_cache", 'app_cache_dir': args.config_dir},
+                            replace_existing_backend=True)
 subliminal.region.backend.sync()
 
 if not os.path.exists(os.path.join(args.config_dir, 'config', 'releases.txt')):
-    from check_update import check_releases
+    from app.check_update import check_releases
     check_releases()
     logging.debug("BAZARR Created releases file")
+
+if not os.path.exists(os.path.join(args.config_dir, 'config', 'announcements.txt')):
+    from app.announcements import get_announcements_to_file
+    get_announcements_to_file()
+    logging.debug("BAZARR Created announcements file")
 
 config_file = os.path.normpath(os.path.join(args.config_dir, 'config', 'config.ini'))
 
@@ -188,24 +202,39 @@ with open(os.path.normpath(os.path.join(args.config_dir, 'config', 'config.ini')
     settings.write(handle)
 
 
+# Remove deprecated providers from enabled providers in config.ini
+existing_providers = provider_registry.names()
+enabled_providers = get_array_from(settings.general.enabled_providers)
+settings.general.enabled_providers = str([x for x in enabled_providers if x in existing_providers])
+with open(os.path.join(args.config_dir, 'config', 'config.ini'), 'w+') as handle:
+    settings.write(handle)
+
+
 def init_binaries():
-    from utils import get_binary
-    exe = get_binary("unrar")
-
-    rarfile.UNRAR_TOOL = exe
-    rarfile.ORIG_UNRAR_TOOL = exe
     try:
-        rarfile.custom_check([rarfile.UNRAR_TOOL], True)
-    except Exception:
-        logging.debug("custom check failed for: %s", exe)
+        exe = get_binary("unar")
+        rarfile.UNAR_TOOL = exe
+        rarfile.UNRAR_TOOL = None
+        rarfile.tool_setup(unrar=False, unar=True, bsdtar=False, force=True)
+    except (BinaryNotFound, rarfile.RarCannotExec):
+        try:
+            exe = get_binary("unrar")
+            rarfile.UNRAR_TOOL = exe
+            rarfile.UNAR_TOOL = None
+            rarfile.tool_setup(unrar=True, unar=False, bsdtar=False, force=True)
+        except (BinaryNotFound, rarfile.RarCannotExec):
+            logging.exception("BAZARR requires a rar archive extraction utilities (unrar, unar) and it can't be found.")
+            raise BinaryNotFound
+        else:
+            logging.debug("Using UnRAR from: %s", exe)
+            return exe
+    else:
+        logging.debug("Using unar from: %s", exe)
+        return exe
 
-    logging.debug("Using UnRAR from: %s", exe)
-    unrar = exe
 
-    return unrar
-
-
-from database import init_db, migrate_db  # noqa E402
+# keep this import at the end to prevent peewee.OperationalError: unable to open database file
+from app.database import init_db, migrate_db  # noqa E402
 init_db()
 migrate_db()
 init_binaries()

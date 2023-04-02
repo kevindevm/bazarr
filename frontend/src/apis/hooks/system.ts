@@ -1,12 +1,20 @@
+import { Environment } from "@/utilities";
+import { setAuthenticated } from "@/utilities/event";
 import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "react-query";
-import { setUnauthenticated } from "../../@redux/actions";
-import store from "../../@redux/store";
 import { QueryKeys } from "../queries/keys";
 import api from "../raw";
 
 export function useBadges() {
-  return useQuery([QueryKeys.System, QueryKeys.Badges], () => api.badges.all());
+  return useQuery(
+    [QueryKeys.System, QueryKeys.Badges],
+    () => api.badges.all(),
+    {
+      refetchOnWindowFocus: "always",
+      refetchInterval: 1000 * 60,
+      staleTime: 1000 * 10,
+    }
+  );
 }
 
 export function useFileSystem(
@@ -49,6 +57,11 @@ export function useSettingsMutation() {
     {
       onSuccess: () => {
         client.invalidateQueries([QueryKeys.System]);
+        client.invalidateQueries([QueryKeys.Series]);
+        client.invalidateQueries([QueryKeys.Episodes]);
+        client.invalidateQueries([QueryKeys.Movies]);
+        client.invalidateQueries([QueryKeys.Wanted]);
+        client.invalidateQueries([QueryKeys.Badges]);
       },
     }
   );
@@ -68,7 +81,7 @@ export function useSystemLogs() {
   return useQuery([QueryKeys.System, QueryKeys.Logs], () => api.system.logs(), {
     refetchOnWindowFocus: "always",
     refetchInterval: 1000 * 60,
-    staleTime: 1000,
+    staleTime: 1000 * 10,
   });
 }
 
@@ -80,6 +93,35 @@ export function useDeleteLogs() {
     {
       onSuccess: () => {
         client.invalidateQueries([QueryKeys.System, QueryKeys.Logs]);
+      },
+    }
+  );
+}
+
+export function useSystemAnnouncements() {
+  return useQuery(
+    [QueryKeys.System, QueryKeys.Announcements],
+    () => api.system.announcements(),
+    {
+      refetchOnWindowFocus: "always",
+      refetchInterval: 1000 * 60,
+      staleTime: 1000 * 10,
+    }
+  );
+}
+
+export function useSystemAnnouncementsAddDismiss() {
+  const client = useQueryClient();
+  return useMutation(
+    [QueryKeys.System, QueryKeys.Announcements],
+    (param: { hash: string }) => {
+      const { hash } = param;
+      return api.system.addAnnouncementsDismiss(hash);
+    },
+    {
+      onSuccess: (_, { hash }) => {
+        client.invalidateQueries([QueryKeys.System, QueryKeys.Announcements]);
+        client.invalidateQueries([QueryKeys.System, QueryKeys.Badges]);
       },
     }
   );
@@ -173,7 +215,7 @@ export function useSystem() {
     () => api.system.logout(),
     {
       onSuccess: () => {
-        store.dispatch(setUnauthenticated());
+        setAuthenticated(false);
         client.clear();
       },
     }
@@ -185,7 +227,8 @@ export function useSystem() {
       api.system.login(param.username, param.password),
     {
       onSuccess: () => {
-        window.location.reload();
+        // TODO: Hard-coded value
+        window.location.replace(Environment.baseUrl);
       },
     }
   );
@@ -216,7 +259,7 @@ export function useSystem() {
       shutdown,
       restart,
       login,
-      isWorking: isLoggingOut || isShuttingDown || isRestarting || isLoggingIn,
+      isMutating: isLoggingOut || isShuttingDown || isRestarting || isLoggingIn,
     }),
     [
       isLoggingIn,

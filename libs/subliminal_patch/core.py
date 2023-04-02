@@ -10,6 +10,7 @@ import socket
 import traceback
 import time
 import operator
+import unicodedata
 
 import itertools
 from six.moves.http_client import ResponseNotReady
@@ -26,8 +27,8 @@ from concurrent.futures import as_completed
 
 from .extensions import provider_registry
 from .exceptions import MustGetBlacklisted
+from .score import compute_score as default_compute_score
 from subliminal.exceptions import ServiceUnavailable, DownloadLimitExceeded
-from subliminal.score import compute_score as default_compute_score
 from subliminal.utils import hash_napiprojekt, hash_opensubtitles, hash_shooter, hash_thesubdb
 from subliminal.video import VIDEO_EXTENSIONS, Video, Episode, Movie
 from subliminal.core import guessit, ProviderPool, io, is_windows_special_path, \
@@ -69,14 +70,94 @@ def remove_crap_from_fn(fn):
     return REMOVE_CRAP_FROM_FILENAME.sub(repl, fn)
 
 
+def _nested_update(item, to_update):
+    for k, v in to_update.items():
+        if isinstance(v, dict):
+            item[k] = _nested_update(item.get(k, {}), v)
+        else:
+            item[k] = v
+
+    return item
+
+
+class _ProviderConfigs(dict):
+    def __init__(self, pool, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._pool = pool
+
+    def update(self, items):
+        updated = set()
+        # Restart providers with new configs
+        for key, val in items.items():
+            # Don't restart providers that are not enabled
+            if key not in self._pool.providers:
+                continue
+
+            # key: provider's name; val: config dict
+            registered_val = self.get(key)
+
+            if registered_val is None or registered_val == val:
+                continue
+
+            updated.add(key)
+
+            # The new dict might be a partial dict
+            registered_val.update(val)
+
+            logger.debug("Config changed. Restarting provider: %s", key)
+            try:
+                provider = provider_registry[key](**registered_val) # type: ignore
+                provider.initialize()
+            except Exception as error:
+                self._pool.throttle_callback(key, error)
+            else:
+                self._pool.initialized_providers[key] = provider
+
+        if updated:
+            logger.debug("Providers with config updates: %s", updated)
+        else:
+            logger.debug("No provider config updates")
+
+        _nested_update(self, items)
+
+        return None
+
+
+class _Banlist:
+    def __init__(self, must_not_contain, must_contain):
+        self.must_not_contain = must_not_contain
+        self.must_contain = must_contain
+
+    def is_valid(self, subtitle):
+        if subtitle.release_info is None:
+            return True
+
+        if any([x for x in self.must_not_contain
+                if re.search(x, subtitle.release_info, flags=re.IGNORECASE) is not None]):
+            logger.info("Skipping subtitle because release name contains prohibited string: %s", subtitle)
+            return False
+        if any([x for x in self.must_contain
+                if re.search(x, subtitle.release_info, flags=re.IGNORECASE) is None]):
+            logger.info("Skipping subtitle because release name does not contains required string: %s", subtitle)
+            return False
+
+        return True
+
+
+class _Blacklist(list):
+    def is_valid(self, provider, subtitle):
+        blacklisted = (str(provider), str(subtitle.id)) in self
+        if blacklisted:
+            logger.debug("Blacklisted subtitle: %s", subtitle)
+
+        return not blacklisted
+
+
 class SZProviderPool(ProviderPool):
     def __init__(self, providers=None, provider_configs=None, blacklist=None, ban_list=None, throttle_callback=None,
                  pre_download_hook=None, post_download_hook=None, language_hook=None):
         #: Name of providers to use
         self.providers = set(providers or [])
-
-        #: Provider configuration
-        self.provider_configs = provider_configs or {}
 
         #: Initialized providers
         self.initialized_providers = {}
@@ -84,10 +165,10 @@ class SZProviderPool(ProviderPool):
         #: Discarded providers
         self.discarded_providers = set()
 
-        self.blacklist = blacklist or []
+        self.blacklist = _Blacklist(blacklist or [])
 
         #: Should be a dict of 2 lists of strings
-        self.ban_list = ban_list or {'must_contain': [], 'must_not_contain': []}
+        self.ban_list = _Banlist(**(ban_list or {'must_contain': [], 'must_not_contain': []}))
 
         self.throttle_callback = throttle_callback
 
@@ -100,17 +181,34 @@ class SZProviderPool(ProviderPool):
         if not self.throttle_callback:
             self.throttle_callback = lambda x, y: x
 
+        #: Provider configuration
+        self.provider_configs = _ProviderConfigs(self)
+        self.provider_configs.update(provider_configs or {})
+
     def update(self, providers, provider_configs, blacklist, ban_list):
         # Check if the pool was initialized enough hours ago
         self._check_lifetime()
 
+        providers = set(providers or [])
+
         # Check if any new provider has been added
-        updated = set(providers) != self.providers or ban_list != self.ban_list
-        removed_providers = list(sorted(self.providers - set(providers)))
-        new_providers = list(sorted(set(providers) - self.providers))
+        updated = providers != self.providers or ban_list != self.ban_list
+        removed_providers = set(sorted(self.providers - providers))
+
+        logger.debug("Discarded providers: %s | New providers: %s", self.discarded_providers, providers)
+        self.discarded_providers.difference_update(providers)
+        logger.debug("Updated discarded providers: %s", self.discarded_providers)
+
+        removed_providers.update(self.discarded_providers)
+
+        logger.debug("Removed providers: %s", removed_providers)
+
+        self.providers.difference_update(removed_providers)
+        self.providers.update(list(providers))
 
         # Terminate and delete removed providers from instance
         for removed in removed_providers:
+            logger.debug("Removing provider: %s", removed)
             try:
                 del self[removed]
                 # If the user has updated the providers but hasn't made any
@@ -119,35 +217,11 @@ class SZProviderPool(ProviderPool):
             except KeyError:
                 pass
 
-        if updated:
-            logger.debug("Removed providers: %s", removed_providers)
-            logger.debug("New providers: %s", new_providers)
+        # self.provider_configs = provider_configs
+        self.provider_configs.update(provider_configs)
 
-            self.discarded_providers.difference_update(new_providers)
-            self.providers.difference_update(removed_providers)
-            self.providers.update(list(providers))
-
-        self.blacklist = blacklist
-
-        # Restart providers with new configs
-        for key, val in provider_configs.items():
-            # key: provider's name; val: config dict
-            old_val = self.provider_configs.get(key)
-
-            if old_val == val:
-                continue
-
-            logger.debug("Restarting provider: %s", key)
-            try:
-                provider = provider_registry[key](**val)
-                provider.initialize()
-            except Exception as error:
-                self.throttle_callback(key, error)
-            else:
-                self.initialized_providers[key] = provider
-                updated = True
-
-        self.provider_configs = provider_configs
+        self.blacklist = _Blacklist(blacklist or [])
+        self.ban_list = _Banlist(**ban_list or {'must_contain': [], 'must_not_contain': []})
 
         return updated
 
@@ -238,18 +312,12 @@ class SZProviderPool(ProviderPool):
             seen = []
             out = []
             for s in results:
-                if (str(provider), str(s.id)) in self.blacklist:
-                    logger.info("Skipping blacklisted subtitle: %s", s)
+                if not self.blacklist.is_valid(provider, s):
                     continue
-                if s.release_info is not None:
-                    if any([x for x in self.ban_list["must_not_contain"]
-                            if re.search(x, s.release_info, flags=re.IGNORECASE) is not None]):
-                        logger.info("Skipping subtitle because release name contains prohibited string: %s", s)
-                        continue
-                    if any([x for x in self.ban_list["must_contain"]
-                            if re.search(x, s.release_info, flags=re.IGNORECASE) is None]):
-                        logger.info("Skipping subtitle because release name does not contains required string: %s", s)
-                        continue
+
+                if not self.ban_list.is_valid(s):
+                    continue
+
                 if s.id in seen:
                     continue
 
@@ -372,7 +440,7 @@ class SZProviderPool(ProviderPool):
         return True
 
     def download_best_subtitles(self, subtitles, video, languages, min_score=0, hearing_impaired=False, only_one=False,
-                                compute_score=None, score_obj=None):
+                                compute_score=None):
         """Download the best matching subtitles.
         
         patch: 
@@ -405,7 +473,7 @@ class SZProviderPool(ProviderPool):
 
         for s in subtitles:
             # get the matches
-            if s.language not in languages:
+            if s.language.basename not in [x.basename for x in languages]:
                 logger.debug("%r: Skipping, language not searched for", s)
                 continue
 
@@ -418,8 +486,7 @@ class SZProviderPool(ProviderPool):
             orig_matches = matches.copy()
 
             logger.debug('%r: Found matches %r', s, matches)
-            score, score_without_hash = compute_score(matches, s, video, hearing_impaired=use_hearing_impaired,
-                                                      score_obj=score_obj)
+            score, score_without_hash = compute_score(matches, s, video, use_hearing_impaired)
             unsorted_subtitles.append(
                 (s, score, score_without_hash, matches, orig_matches))
 
@@ -435,12 +502,12 @@ class SZProviderPool(ProviderPool):
                 break
 
             # stop when all languages are downloaded
-            if set(s.language for s in downloaded_subtitles) == languages:
+            if set(s.language.basename for s in downloaded_subtitles) == languages:
                 logger.debug('All languages downloaded')
                 break
 
             # check downloaded languages
-            if subtitle.language in set(s.language for s in downloaded_subtitles):
+            if subtitle.language in set(s.language.basename for s in downloaded_subtitles):
                 logger.debug('%r: Skipping subtitle: already downloaded', subtitle.language)
                 continue
 
@@ -532,6 +599,12 @@ class SZProviderPool(ProviderPool):
 
         return video_types
 
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__} [{len(self.providers)} providers ({len(self.initialized_providers)} "
+            f"initialized; {len(self.discarded_providers)} discarded)]"
+        )
+
 
 class SZAsyncProviderPool(SZProviderPool):
     """Subclass of :class:`ProviderPool` with asynchronous support for :meth:`~ProviderPool.list_subtitles`.
@@ -544,8 +617,18 @@ class SZAsyncProviderPool(SZProviderPool):
         super(SZAsyncProviderPool, self).__init__(*args, **kwargs)
 
         #: Maximum number of threads to use
-        self.max_workers = max_workers or len(self.providers)
+        self._max_workers_set = max_workers is not None
+        self.max_workers = (max_workers or len(self.providers)) or 1
         logger.info("Using %d threads for %d providers (%s)", self.max_workers, len(self.providers), self.providers)
+
+    def update(self, *args, **kwargs):
+        updated = super().update(*args, **kwargs)
+
+        if (len(self.providers) and not self._max_workers_set) and len(self.providers) != self.max_workers:
+            logger.debug("This pool will use %d threads from now on", len(self.providers))
+            self.max_workers = len(self.providers)
+
+        return updated
 
     def list_subtitles_provider(self, provider, video, languages):
         # list subtitles
@@ -658,7 +741,6 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
 
     """
     hints = hints or {}
-    video_type = hints.get("type")
 
     # check for non-existing path
     if not dont_use_actual_file and not os.path.exists(path):
@@ -671,42 +753,15 @@ def scan_video(path, dont_use_actual_file=False, hints=None, providers=None, ski
     dirpath, filename = os.path.split(path)
     logger.info('Determining basic video properties for %r in %r', filename, dirpath)
 
-    # hint guessit the filename itself and its 2 parent directories if we're an episode (most likely
-    # Series name/Season/filename), else only one
-    split_path = os.path.normpath(path).split(os.path.sep)[-3 if video_type == "episode" else -2:]
-
-    # remove crap from folder names
-    if video_type == "episode":
-        if len(split_path) > 2:
-            split_path[-3] = remove_crap_from_fn(split_path[-3])
-    else:
-        if len(split_path) > 1:
-            split_path[-2] = remove_crap_from_fn(split_path[-2])
-
-    guess_from = os.path.join(*split_path)
-
-    # remove crap from file name
-    guess_from = remove_crap_from_fn(guess_from)
-
-    # guess
     hints["single_value"] = True
-    if "title" in hints:
-        hints["expected_title"] = [hints["title"]]
+    #    if "title" in hints:
+    #        hints["expected_title"] = [hints["title"]]
 
-    guessed_result = guessit(guess_from, options=hints)
+    guessed_result = guessit(path, options=hints)
 
     logger.debug('GuessIt found: %s', json.dumps(guessed_result, cls=GuessitEncoder, indent=4, ensure_ascii=False))
     video = Video.fromguess(path, guessed_result)
-    video.hints = hints
-
-    # get possibly alternative title from the filename itself
-    alt_guess = guessit(filename, options=hints)
-    if "title" in alt_guess and alt_guess["title"] != guessed_result["title"]:
-        if video_type == "episode":
-            video.alternative_series.append(alt_guess["title"])
-        else:
-            video.alternative_titles.append(alt_guess["title"])
-        logger.debug("Adding alternative title: %s", alt_guess["title"])
+    video.hints = hints # ?
 
     if dont_use_actual_file and not hash_from:
         return video
@@ -770,7 +825,7 @@ def _search_external_subtitles(path, languages=None, only_one=False, scandir_gen
         if not entry.is_file(follow_symlinks=False):
             continue
 
-        p = entry.name
+        p = unicodedata.normalize('NFC', entry.name)
 
         # keep only valid subtitle filenames
         if not p.lower().endswith(SUBTITLE_EXTENSIONS):
@@ -949,7 +1004,7 @@ def download_subtitles(subtitles, pool_class=ProviderPool, **kwargs):
 
 
 def download_best_subtitles(videos, languages, min_score=0, hearing_impaired=False, only_one=False, compute_score=None,
-                            pool_class=ProviderPool, throttle_time=0, score_obj=None, **kwargs):
+                            pool_class=ProviderPool, throttle_time=0, **kwargs):
     """List and download the best matching subtitles.
 
     The `videos` must pass the `languages` and `undefined` (`only_one`) checks of :func:`check_video`.
@@ -993,7 +1048,7 @@ def download_best_subtitles(videos, languages, min_score=0, hearing_impaired=Fal
             subtitles = pool.download_best_subtitles(pool.list_subtitles(video, languages - video.subtitle_languages),
                                                      video, languages, min_score=min_score,
                                                      hearing_impaired=hearing_impaired, only_one=only_one,
-                                                     compute_score=compute_score, score_obj=score_obj)
+                                                     compute_score=compute_score)
             logger.info('Downloaded %d subtitle(s)', len(subtitles))
             downloaded_subtitles[video].extend(subtitles)
 
@@ -1063,19 +1118,23 @@ def save_subtitles(file_path, subtitles, single=False, directory=None, chmod=Non
 
     saved_subtitles = []
     for subtitle in subtitles:
+        # check if HI mods will be used to get the proper name for the subtitles file
+        must_remove_hi = 'remove_HI' in subtitle.mods
+
         # check content
         if subtitle.content is None:
             logger.error('Skipping subtitle %r: no content', subtitle)
             continue
 
         # check language
-        if subtitle.language in set(s.language for s in saved_subtitles):
+        if subtitle.language in set(s.language.basename for s in saved_subtitles):
             logger.debug('Skipping subtitle %r: language already saved', subtitle)
             continue
 
         # create subtitle path
         subtitle_path = get_subtitle_path(file_path, None if single else subtitle.language,
-                                          forced_tag=subtitle.language.forced, hi_tag=subtitle.language.hi, tags=tags)
+                                          forced_tag=subtitle.language.forced,
+                                          hi_tag=False if must_remove_hi else subtitle.language.hi, tags=tags)
         if directory is not None:
             subtitle_path = os.path.join(directory, os.path.split(subtitle_path)[1])
 

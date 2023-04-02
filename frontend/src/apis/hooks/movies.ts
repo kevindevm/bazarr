@@ -36,7 +36,6 @@ export function useMovies() {
     [QueryKeys.Movies, QueryKeys.All],
     () => api.movies.movies(),
     {
-      enabled: false,
       onSuccess: (data) => {
         cacheMovies(client, data);
       },
@@ -124,8 +123,10 @@ export function useMovieDeleteBlacklist() {
 }
 
 export function useMovieHistoryPagination() {
-  return usePaginationQuery([QueryKeys.Movies, QueryKeys.History], (param) =>
-    api.movies.history(param)
+  return usePaginationQuery(
+    [QueryKeys.Movies, QueryKeys.History],
+    (param) => api.movies.history(param),
+    false
   );
 }
 

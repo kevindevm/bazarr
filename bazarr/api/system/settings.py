@@ -3,17 +3,23 @@
 import json
 
 from flask import request, jsonify
-from flask_restful import Resource
+from flask_restx import Resource, Namespace
+
+from app.database import TableLanguagesProfiles, TableSettingsLanguages, TableShows, TableMovies, \
+    TableSettingsNotifier, update_profile_id_list
+from app.event_handler import event_stream
+from app.config import settings, save_settings, get_settings
+from app.scheduler import scheduler
+from subtitles.indexer.series import list_missing_subtitles
+from subtitles.indexer.movies import list_missing_subtitles_movies
 
 from ..utils import authenticate
-from database import TableLanguagesProfiles, TableSettingsLanguages, TableShows, TableMovies, TableSettingsNotifier, \
-    update_profile_id_list
-from event_handler import event_stream
-from config import settings, save_settings, get_settings
-from scheduler import scheduler
-from list_subtitles import list_missing_subtitles, list_missing_subtitles_movies
+
+api_ns_system_settings = Namespace('systemSettings', description='System settings API endpoint')
 
 
+@api_ns_system_settings.hide
+@api_ns_system_settings.route('system/settings')
 class SystemSettings(Resource):
     @authenticate
     def get(self):
@@ -59,6 +65,7 @@ class SystemSettings(Resource):
                         TableLanguagesProfiles.items: json.dumps(item['items']),
                         TableLanguagesProfiles.mustContain: item['mustContain'],
                         TableLanguagesProfiles.mustNotContain: item['mustNotContain'],
+                        TableLanguagesProfiles.originalFormat: item['originalFormat'] if item['originalFormat'] != 'null' else None,
                     })\
                         .where(TableLanguagesProfiles.profileId == item['profileId'])\
                         .execute()
@@ -72,6 +79,7 @@ class SystemSettings(Resource):
                         TableLanguagesProfiles.items: json.dumps(item['items']),
                         TableLanguagesProfiles.mustContain: item['mustContain'],
                         TableLanguagesProfiles.mustNotContain: item['mustNotContain'],
+                        TableLanguagesProfiles.originalFormat: item['originalFormat'] if item['originalFormat'] != 'null' else None,
                     }).execute()
             for profileId in existing:
                 # Unassign this profileId from series and movies
@@ -84,13 +92,15 @@ class SystemSettings(Resource):
                 # Remove deleted profiles
                 TableLanguagesProfiles.delete().where(TableLanguagesProfiles.profileId == profileId).execute()
 
-            update_profile_id_list()
+            # invalidate cache
+            update_profile_id_list.invalidate()
+
             event_stream("languages")
 
             if settings.general.getboolean('use_sonarr'):
-                scheduler.add_job(list_missing_subtitles, kwargs={'send_event': False})
+                scheduler.add_job(list_missing_subtitles, kwargs={'send_event': True})
             if settings.general.getboolean('use_radarr'):
-                scheduler.add_job(list_missing_subtitles_movies, kwargs={'send_event': False})
+                scheduler.add_job(list_missing_subtitles_movies, kwargs={'send_event': True})
 
         # Update Notification
         notifications = request.form.getlist('notifications-providers')

@@ -1,21 +1,20 @@
-import { faSearch } from "@fortawesome/free-solid-svg-icons";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   useMovieAction,
   useMovieSubtitleModification,
   useMovieWantedPagination,
-} from "apis/hooks";
-import { AsyncButton, LanguageText } from "components";
-import WantedView from "components/views/WantedView";
-import React, { FunctionComponent, useMemo } from "react";
-import { Badge } from "react-bootstrap";
+} from "@/apis/hooks";
+import Language from "@/components/bazarr/Language";
+import { task, TaskGroup } from "@/modules/task";
+import WantedView from "@/pages/views/WantedView";
+import { BuildKey } from "@/utilities";
+import { faSearch } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { Anchor, Badge, Group } from "@mantine/core";
+import { FunctionComponent, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { Column } from "react-table";
-import { BuildKey } from "utilities";
 
-interface Props {}
-
-const WantedMoviesView: FunctionComponent<Props> = () => {
+const WantedMoviesView: FunctionComponent = () => {
   const columns: Column<Wanted.Movie>[] = useMemo<Column<Wanted.Movie>[]>(
     () => [
       {
@@ -24,9 +23,9 @@ const WantedMoviesView: FunctionComponent<Props> = () => {
         Cell: (row) => {
           const target = `/movies/${row.row.original.radarrId}`;
           return (
-            <Link to={target}>
-              <span>{row.value}</span>
-            </Link>
+            <Anchor component={Link} to={target}>
+              {row.value}
+            </Anchor>
           );
         },
       },
@@ -39,27 +38,35 @@ const WantedMoviesView: FunctionComponent<Props> = () => {
 
           const { download } = useMovieSubtitleModification();
 
-          return value.map((item, idx) => (
-            <AsyncButton
-              as={Badge}
-              key={BuildKey(idx, item.code2)}
-              className="mx-1 mr-2"
-              variant="secondary"
-              promise={() =>
-                download.mutateAsync({
-                  radarrId,
-                  form: {
-                    language: item.code2,
-                    hi,
-                    forced: false,
-                  },
-                })
-              }
-            >
-              <LanguageText className="pr-1" text={item}></LanguageText>
-              <FontAwesomeIcon size="sm" icon={faSearch}></FontAwesomeIcon>
-            </AsyncButton>
-          ));
+          return (
+            <Group spacing="sm">
+              {value.map((item, idx) => (
+                <Badge
+                  color={download.isLoading ? "gray" : undefined}
+                  leftSection={<FontAwesomeIcon icon={faSearch} />}
+                  key={BuildKey(idx, item.code2)}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => {
+                    task.create(
+                      item.name,
+                      TaskGroup.SearchSubtitle,
+                      download.mutateAsync,
+                      {
+                        radarrId,
+                        form: {
+                          language: item.code2,
+                          hi,
+                          forced: false,
+                        },
+                      }
+                    );
+                  }}
+                >
+                  <Language.Text value={item}></Language.Text>
+                </Badge>
+              ))}
+            </Group>
+          );
         },
       },
     ],

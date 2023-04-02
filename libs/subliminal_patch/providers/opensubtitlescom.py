@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 SHOW_EXPIRATION_TIME = datetime.timedelta(weeks=1).total_seconds()
 TOKEN_EXPIRATION_TIME = datetime.timedelta(hours=12).total_seconds()
 
-retry_amount = 5
+retry_amount = 3
 
 
 def fix_tv_naming(title):
@@ -55,7 +55,7 @@ class OpenSubtitlesComSubtitle(Subtitle):
     hash_verifiable = False
 
     def __init__(self, language, forced, hearing_impaired, page_link, file_id, releases, uploader, title, year,
-                 hash_matched, file_hash=None, season=None, episode=None):
+                 hash_matched, file_hash=None, season=None, episode=None, imdb_match=False):
         language = Language.rebuild(language, hi=hearing_impaired, forced=forced)
 
         self.title = title
@@ -75,6 +75,7 @@ class OpenSubtitlesComSubtitle(Subtitle):
         self.hash = file_hash
         self.encoding = 'utf-8'
         self.hash_matched = hash_matched
+        self.imdb_match = imdb_match
 
     @property
     def id(self):
@@ -88,23 +89,27 @@ class OpenSubtitlesComSubtitle(Subtitle):
         if type_ == "episode":
             # series
             matches.add('series')
-            # year
-            if video.year == self.year:
-                matches.add('year')
             # season
             if video.season == self.season:
                 matches.add('season')
             # episode
             if video.episode == self.episode:
                 matches.add('episode')
+            # imdb
+            if self.imdb_match:
+                matches.add('series_imdb_id')
         else:
             # title
             matches.add('title')
-            # year
-            if video.year == self.year:
-                matches.add('year')
+            # imdb
+            if self.imdb_match:
+                matches.add('imdb_id')
 
         # rest is same for both groups
+
+        # year
+        if video.year == self.year:
+            matches.add('year')
 
         # release_group
         if (video.release_group and self.releases and
@@ -129,6 +134,7 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
 
     languages = {Language.fromopensubtitles(lang) for lang in language_converters['szopensubtitles'].codes}
     languages.update(set(Language.rebuild(lang, forced=True) for lang in languages))
+    languages.update(set(Language.rebuild(l, hi=True) for l in languages))
 
     video_types = (Episode, Movie)
 
@@ -205,7 +211,7 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
         )
 
         if results == 401:
-            logging.debug('Authentification failed: clearing cache and attempting to login.')
+            logging.debug('Authentication failed: clearing cache and attempting to login.')
             region.delete("oscom_token")
             self.login()
 
@@ -245,6 +251,9 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
             logger.debug(f'No match found for {title}')
 
     def query(self, languages, video):
+        if region.get("oscom_token", expiration_time=TOKEN_EXPIRATION_TIME) is NO_VALUE:
+            logger.debug("No cached token, we'll try to login again.")
+            self.login()
         self.video = video
         if self.use_hash:
             file_hash = self.video.hashes.get('opensubtitlescom')
@@ -270,15 +279,6 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
                 return []
 
         lang_strings = [str(lang.basename) for lang in languages]
-        only_foreign = all([lang.forced for lang in languages])
-        also_foreign = any([lang.forced for lang in languages])
-        if only_foreign:
-            forced = 'only'
-        elif also_foreign:
-            forced = 'include'
-        else:
-            forced = 'exclude'
-
         langs = ','.join(lang_strings)
         logging.debug(f'Searching for this languages: {lang_strings}')
 
@@ -287,10 +287,11 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
             res = self.retry(
                 lambda: checked(
                     lambda: self.session.get(self.server_url + 'subtitles',
-                                             params=(('episode_number', self.video.episode),
-                                                     ('foreign_parts_only', forced),
+                                             params=(('ai_translated', 'exclude'),
+                                                     ('episode_number', self.video.episode),
                                                      ('imdb_id', imdb_id if not title_id else None),
                                                      ('languages', langs.lower()),
+                                                     ('machine_translated', 'exclude'),
                                                      ('moviehash', file_hash),
                                                      ('parent_feature_id', title_id if title_id else None),
                                                      ('season_number', self.video.season)),
@@ -304,10 +305,11 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
             res = self.retry(
                 lambda: checked(
                     lambda: self.session.get(self.server_url + 'subtitles',
-                                             params=(('foreign_parts_only', forced),
+                                             params=(('ai_translated', 'exclude'),
                                                      ('id', title_id if title_id else None),
                                                      ('imdb_id', imdb_id if not title_id else None),
                                                      ('languages', langs.lower()),
+                                                     ('machine_translated', 'exclude'),
                                                      ('moviehash', file_hash)),
                                              timeout=30),
                     validate_json=True,
@@ -319,6 +321,14 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
         subtitles = []
 
         result = res.json()
+
+        # filter out forced subtitles or not depending on the required languages
+        if all([lang.forced for lang in languages]):  # only forced
+            result['data'] = [x for x in result['data'] if x['attributes']['foreign_parts_only']]
+        elif any([lang.forced for lang in languages]):  # also forced
+            pass
+        else:  # not forced
+            result['data'] = [x for x in result['data'] if not x['attributes']['foreign_parts_only']]
 
         logging.debug(f"Query returned {len(result['data'])} subtitles")
 
@@ -339,6 +349,11 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
                 else:
                     moviehash_match = False
 
+                try:
+                    year = int(item['attributes']['feature_details']['year'])
+                except TypeError:
+                    year = item['attributes']['feature_details']['year']
+
                 if len(item['attributes']['files']):
                     subtitle = OpenSubtitlesComSubtitle(
                         language=Language.fromietf(item['attributes']['language']),
@@ -349,10 +364,11 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
                         releases=item['attributes']['release'],
                         uploader=item['attributes']['uploader']['name'],
                         title=item['attributes']['feature_details']['movie_name'],
-                        year=item['attributes']['feature_details']['year'],
+                        year=year,
                         season=season_number,
                         episode=episode_number,
-                        hash_matched=moviehash_match
+                        hash_matched=moviehash_match,
+                        imdb_match=True if imdb_id else False
                     )
                     subtitle.get_matches(self.video)
                     subtitles.append(subtitle)
@@ -363,7 +379,7 @@ class OpenSubtitlesComProvider(ProviderRetryMixin, Provider):
         return self.query(languages, video)
 
     def download_subtitle(self, subtitle):
-        if self.token is NO_VALUE:
+        if region.get("oscom_token", expiration_time=TOKEN_EXPIRATION_TIME) is NO_VALUE:
             logger.debug("No cached token, we'll try to login again.")
             self.login()
         if self.token is NO_VALUE:
@@ -439,7 +455,10 @@ def checked(fn, raise_api_limit=False, validate_token=False, validate_json=False
     except Exception:
         status_code = None
     else:
-        if status_code == 401:
+        if status_code == 400:
+            raise ConfigurationError('Do not use email but username')
+        elif status_code == 401:
+            time.sleep(1)
             if validate_token:
                 return 401
             else:
@@ -447,7 +466,17 @@ def checked(fn, raise_api_limit=False, validate_token=False, validate_json=False
         elif status_code == 403:
             raise ProviderError("Bazarr API key seems to be in problem")
         elif status_code == 406:
-            raise DownloadLimitExceeded("Daily download limit reached")
+            try:
+                json_response = response.json()
+                download_count = json_response['requests']
+                remaining_download = json_response['remaining']
+                quota_reset_time = json_response['reset_time']
+            except JSONDecodeError:
+                raise ProviderError('Invalid JSON returned by provider')
+            else:
+                raise DownloadLimitExceeded(f"Daily download limit reached. {download_count} subtitles have been "
+                                            f"downloaded and {remaining_download} remaining subtitles can be "
+                                            f"downloaded. Quota will be reset in {quota_reset_time}.")
         elif status_code == 410:
             raise ProviderError("Download as expired")
         elif status_code == 429:

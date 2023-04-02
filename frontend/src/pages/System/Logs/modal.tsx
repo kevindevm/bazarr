@@ -1,26 +1,26 @@
-import { BaseModal, BaseModalProps, useModalPayload } from "components";
-import React, { FunctionComponent, useMemo } from "react";
+import { withModal } from "@/modules/modals";
+import { Code, Text } from "@mantine/core";
+import { FunctionComponent, useMemo } from "react";
 
-interface Props extends BaseModalProps {}
+interface Props {
+  stack: string;
+}
 
-const SystemLogModal: FunctionComponent<Props> = ({ ...modal }) => {
-  const stack = useModalPayload<string>(modal.modalKey);
+const SystemLogModal: FunctionComponent<Props> = ({ stack }) => {
   const result = useMemo(
     () =>
-      stack?.split("\\n").map((v, idx) => (
-        <p key={idx} className="text-nowrap my-1">
+      stack.split("\\n").map((v, idx) => (
+        <Text my="xs" inherit key={idx}>
           {v}
-        </p>
+        </Text>
       )),
     [stack]
   );
-  return (
-    <BaseModal title="Stack traceback" {...modal}>
-      <pre>
-        <code className="zmdi-language-python-alt">{result}</code>
-      </pre>
-    </BaseModal>
-  );
+
+  return <Code block>{result}</Code>;
 };
 
-export default SystemLogModal;
+export default withModal(SystemLogModal, "system-log", {
+  title: "Stack Traceback",
+  size: "xl",
+});

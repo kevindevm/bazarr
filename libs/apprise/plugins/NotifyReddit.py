@@ -44,7 +44,6 @@
 #   - https://www.reddit.com/dev/api/
 #   - https://www.reddit.com/dev/api/#POST_api_submit
 #   - https://github.com/reddit-archive/reddit/wiki/API
-import six
 import requests
 from json import loads
 from datetime import timedelta
@@ -66,7 +65,7 @@ REDDIT_HTTP_ERROR_MAP = {
 }
 
 
-class RedditMessageKind(object):
+class RedditMessageKind:
     """
     Define the kinds of messages supported
     """
@@ -161,14 +160,14 @@ class NotifyReddit(NotifyBase):
             'type': 'string',
             'private': True,
             'required': True,
-            'regex': (r'^[a-z0-9-]+$', 'i'),
+            'regex': (r'^[a-z0-9_-]+$', 'i'),
         },
         'app_secret': {
             'name': _('Application Secret'),
             'type': 'string',
             'private': True,
             'required': True,
-            'regex': (r'^[a-z0-9-]+$', 'i'),
+            'regex': (r'^[a-z0-9_-]+$', 'i'),
         },
         'target_subreddit': {
             'name': _('Target Subreddit'),
@@ -271,7 +270,7 @@ class NotifyReddit(NotifyBase):
         self.__access_token_expiry = datetime.utcnow()
 
         self.kind = kind.strip().lower() \
-            if isinstance(kind, six.string_types) \
+            if isinstance(kind, str) \
             else self.template_args['kind']['default']
 
         if self.kind not in REDDIT_MESSAGE_KINDS:
@@ -465,7 +464,7 @@ class NotifyReddit(NotifyBase):
                 'api_type': 'json',
                 'extension': 'json',
                 'sr': subreddit,
-                'title': title,
+                'title': title if title else self.app_desc,
                 'kind': kind,
                 'nsfw': True if self.nsfw else False,
                 'resubmit': True if self.resubmit else False,

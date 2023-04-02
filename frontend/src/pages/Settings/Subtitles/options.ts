@@ -1,3 +1,5 @@
+import { SelectorOption } from "@/components";
+
 export const hiExtensionOptions: SelectorOption<string>[] = [
   {
     label: ".hi (Hearing-Impaired)",
@@ -36,6 +38,18 @@ export const antiCaptchaOption: SelectorOption<string>[] = [
   {
     label: "Death by Captcha",
     value: "death-by-captcha",
+  },
+];
+
+export const embeddedSubtitlesParserOption: SelectorOption<string>[] = [
+  {
+    label: "ffprobe (faster)",
+    value: "ffprobe",
+  },
+  {
+    label:
+      "mediainfo (slower but may give better results. Must be already installed)",
+    value: "mediainfo",
   },
 ];
 

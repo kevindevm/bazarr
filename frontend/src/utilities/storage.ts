@@ -1,7 +1,7 @@
+import { useSystemSettings } from "@/apis/hooks";
 import { useCallback } from "react";
-import { useLocalstorageState } from "rooks";
 
-export const uiPageSizeKey = "storage-ui-pageSize";
+export const uiPageSizeKey = "settings-general-page_size";
 
 export function useUpdateLocalStorage() {
   return useCallback((newVals: LooseObject) => {
@@ -13,5 +13,7 @@ export function useUpdateLocalStorage() {
 }
 
 export function usePageSize() {
-  return useLocalstorageState(uiPageSizeKey, 50);
+  const settings = useSystemSettings();
+
+  return settings.data?.general.page_size ?? 50;
 }
