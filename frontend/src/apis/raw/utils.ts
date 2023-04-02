@@ -1,4 +1,4 @@
-import client from "../queries/client";
+import client from "./client";
 
 type UrlTestResponse =
   | {
@@ -11,7 +11,7 @@ type UrlTestResponse =
     };
 
 class RequestUtils {
-  async urlTest(protocol: string, url: string, params?: any) {
+  async urlTest(protocol: string, url: string, params?: LooseObject) {
     try {
       const result = await client.axios.get<UrlTestResponse>(
         `../test/${protocol}/${url}api/system/status`,

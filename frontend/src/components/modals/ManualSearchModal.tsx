@@ -1,88 +1,74 @@
+import { withModal } from "@/modules/modals";
+import { task, TaskGroup } from "@/modules/task";
+import { useTableStyles } from "@/styles";
+import { BuildKey, GetItemId } from "@/utilities";
 import {
   faCaretDown,
   faCheck,
+  faCheckCircle,
   faDownload,
+  faExclamationCircle,
   faInfoCircle,
   faTimes,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { dispatchTask } from "@modules/task";
-import { createTask } from "@modules/task/utilities";
-import { useEpisodesProvider, useMoviesProvider } from "apis/hooks";
-import React, {
-  FunctionComponent,
-  useCallback,
-  useMemo,
-  useState,
-} from "react";
 import {
+  Alert,
+  Anchor,
   Badge,
   Button,
-  Col,
+  Code,
   Collapse,
-  Container,
-  OverlayTrigger,
+  Divider,
+  Group,
+  List,
   Popover,
-  Row,
-} from "react-bootstrap";
+  Stack,
+  Text,
+} from "@mantine/core";
+import { useHover } from "@mantine/hooks";
+import { isString } from "lodash";
+import { FunctionComponent, useCallback, useMemo, useState } from "react";
+import { UseQueryResult } from "react-query";
 import { Column } from "react-table";
-import { GetItemId, isMovie } from "utilities";
-import {
-  BaseModal,
-  BaseModalProps,
-  LanguageText,
-  LoadingIndicator,
-  PageTable,
-  useModalPayload,
-} from "..";
-import "./msmStyle.scss";
+import { Action, PageTable } from "..";
+import Language from "../bazarr/Language";
 
 type SupportType = Item.Movie | Item.Episode;
 
 interface Props<T extends SupportType> {
   download: (item: T, result: SearchResultType) => Promise<void>;
+  query: (
+    id?: number
+  ) => UseQueryResult<SearchResultType[] | undefined, unknown>;
+  item: T;
 }
 
-export function ManualSearchModal<T extends SupportType>(
-  props: Props<T> & BaseModalProps
-) {
-  const { download, ...modal } = props;
+function ManualSearchView<T extends SupportType>(props: Props<T>) {
+  const { download, query: useSearch, item } = props;
 
-  const item = useModalPayload<T>(modal.modalKey);
+  const itemId = useMemo(() => GetItemId(item ?? {}), [item]);
 
-  const [episodeId, setEpisodeId] = useState<number | undefined>(undefined);
-  const [radarrId, setRadarrId] = useState<number | undefined>(undefined);
+  const [id, setId] = useState<number | undefined>(undefined);
 
-  const episodes = useEpisodesProvider(episodeId);
-  const movies = useMoviesProvider(radarrId);
+  const results = useSearch(id);
 
-  const isInitial = episodeId === undefined && radarrId === undefined;
-  const isFetching = episodes.isFetching || movies.isFetching;
-
-  const results = useMemo(
-    () => [...(episodes.data ?? []), ...(movies.data ?? [])],
-    [episodes.data, movies.data]
-  );
+  const isStale = results.data === undefined;
 
   const search = useCallback(() => {
-    setEpisodeId(undefined);
-    setRadarrId(undefined);
-    if (item) {
-      if (isMovie(item)) {
-        setRadarrId(item.radarrId);
-        movies.refetch();
-      } else {
-        setEpisodeId(item.sonarrEpisodeId);
-        episodes.refetch();
-      }
-    }
-  }, [episodes, item, movies]);
+    setId(itemId);
+    results.refetch();
+  }, [itemId, results]);
 
   const columns = useMemo<Column<SearchResultType>[]>(
     () => [
       {
         Header: "Score",
-        accessor: (d) => `${d.score}%`,
+        accessor: "score",
+        Cell: ({ value }) => {
+          const { classes } = useTableStyles();
+          return <Text className={classes.noWrap}>{value}%</Text>;
+        },
       },
       {
         accessor: "language",
@@ -94,8 +80,8 @@ export function ManualSearchModal<T extends SupportType>(
             name: "",
           };
           return (
-            <Badge variant="secondary">
-              <LanguageText text={lang}></LanguageText>
+            <Badge>
+              <Language.Text value={lang}></Language.Text>
             </Badge>
           );
         },
@@ -104,13 +90,19 @@ export function ManualSearchModal<T extends SupportType>(
         Header: "Provider",
         accessor: "provider",
         Cell: (row) => {
+          const { classes } = useTableStyles();
           const value = row.value;
           const { url } = row.row.original;
           if (url) {
             return (
-              <a href={url} target="_blank" rel="noopener noreferrer">
+              <Anchor
+                className={classes.noWrap}
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
                 {value}
-              </a>
+              </Anchor>
             );
           } else {
             return value;
@@ -120,66 +112,50 @@ export function ManualSearchModal<T extends SupportType>(
       {
         Header: "Release",
         accessor: "release_info",
-        className: "text-nowrap",
-        Cell: (row) => {
-          const value = row.value;
-
+        Cell: ({ value }) => {
+          const { classes } = useTableStyles();
           const [open, setOpen] = useState(false);
 
           const items = useMemo(
-            () =>
-              value.slice(1).map((v, idx) => (
-                <span className="release-text hidden-item" key={idx}>
-                  {v}
-                </span>
-              )),
+            () => value.slice(1).map((v, idx) => <Text key={idx}>{v}</Text>),
             [value]
           );
 
           if (value.length === 0) {
-            return <span className="text-muted">Cannot get release info</span>;
-          }
-
-          const cls = [
-            "release-container",
-            "d-flex",
-            "justify-content-between",
-            "align-items-center",
-          ];
-
-          if (value.length > 1) {
-            cls.push("release-multi");
+            return <Text color="dimmed">Cannot get release info</Text>;
           }
 
           return (
-            <div className={cls.join(" ")} onClick={() => setOpen((o) => !o)}>
-              <div className="text-container">
-                <span className="release-text">{value[0]}</span>
-                <Collapse in={open}>
-                  <div>{items}</div>
-                </Collapse>
-              </div>
-
-              {value.length > 1 && (
-                <FontAwesomeIcon
-                  className="release-icon"
-                  icon={faCaretDown}
-                  rotation={open ? 180 : undefined}
-                ></FontAwesomeIcon>
-              )}
-            </div>
+            <Stack spacing={0} onClick={() => setOpen((o) => !o)}>
+              <Text className={classes.primary}>
+                {value[0]}
+                {value.length > 1 && (
+                  <FontAwesomeIcon
+                    icon={faCaretDown}
+                    rotation={open ? 180 : undefined}
+                  ></FontAwesomeIcon>
+                )}
+              </Text>
+              <Collapse in={open}>
+                <>{items}</>
+              </Collapse>
+            </Stack>
           );
         },
       },
       {
         Header: "Upload",
-        accessor: (d) => d.uploader ?? "-",
+        accessor: "uploader",
+        Cell: ({ value }) => {
+          const { classes } = useTableStyles();
+          return <Text className={classes.noWrap}>{value ?? "-"}</Text>;
+        },
       },
       {
         accessor: "matches",
         Cell: (row) => {
-          const { matches, dont_matches } = row.row.original;
-          return <StateIcon matches={matches} dont={dont_matches}></StateIcon>;
+          const { matches, dont_matches: dont } = row.row.original;
+          return <StateIcon matches={matches} dont={dont}></StateIcon>;
         },
       },
       {
@@ -187,24 +163,24 @@ export function ManualSearchModal<T extends SupportType>(
         Cell: ({ row }) => {
           const result = row.original;
           return (
-            <Button
-              size="sm"
+            <Action
+              label="Download"
+              icon={faDownload}
+              color="brand"
               variant="light"
               disabled={item === null}
               onClick={() => {
                 if (!item) return;
 
-                const id = GetItemId(item);
-                const task = createTask(item.title, id, download, item, result);
-                dispatchTask(
-                  "Downloading subtitles...",
-                  [task],
-                  "Downloading..."
+                task.create(
+                  item.title,
+                  TaskGroup.DownloadSubtitle,
+                  download,
+                  item,
+                  result
                 );
               }}
-            >
-              <FontAwesomeIcon icon={faDownload}></FontAwesomeIcon>
-            </Button>
+            ></Action>
           );
         },
       },
@@ -212,131 +188,87 @@ export function ManualSearchModal<T extends SupportType>(
     [download, item]
   );
 
-  const content = () => {
-    if (isInitial) {
-      return (
-        <div className="px-4 py-5">
-          <p className="mb-3 small">{item?.path ?? ""}</p>
-          <Button variant="primary" block onClick={search}>
-            Start Search
-          </Button>
-        </div>
-      );
-    } else if (isFetching) {
-      return <LoadingIndicator animation="grow"></LoadingIndicator>;
-    } else {
-      return (
-        <React.Fragment>
-          <p className="mb-3 small">{item?.path ?? ""}</p>
-          <PageTable
-            emptyText="No Result"
-            columns={columns}
-            data={results}
-          ></PageTable>
-        </React.Fragment>
-      );
-    }
-  };
-
-  const footer = (
-    <Button
-      variant="light"
-      hidden={isFetching === true || isInitial === true}
-      onClick={search}
-    >
-      Search Again
-    </Button>
-  );
-
-  const title = useMemo(() => {
-    let title = "Unknown";
-
-    if (item) {
-      if (item.sceneName) {
-        title = item.sceneName;
-      } else if (isMovie(item)) {
-        title = item.title;
-      } else {
-        title = item.title;
-      }
-    }
-    return `Search - ${title}`;
-  }, [item]);
+  const bSceneNameAvailable =
+    isString(item.sceneName) && item.sceneName.length !== 0;
 
   return (
-    <BaseModal
-      closeable={isFetching === false}
-      size="xl"
-      title={title}
-      footer={footer}
-      {...modal}
-    >
-      {content()}
-    </BaseModal>
+    <Stack>
+      <Alert
+        title="Resource"
+        color="gray"
+        icon={<FontAwesomeIcon icon={faInfoCircle}></FontAwesomeIcon>}
+      >
+        <Text size="sm">{item?.path}</Text>
+        <Divider hidden={!bSceneNameAvailable} my="xs"></Divider>
+        <Code hidden={!bSceneNameAvailable}>{item?.sceneName}</Code>
+      </Alert>
+      <Collapse in={!isStale && !results.isFetching}>
+        <PageTable
+          tableStyles={{ emptyText: "No result", placeholder: 10 }}
+          columns={columns}
+          data={results.data ?? []}
+        ></PageTable>
+      </Collapse>
+      <Divider></Divider>
+      <Button loading={results.isFetching} fullWidth onClick={search}>
+        {isStale ? "Search" : "Search Again"}
+      </Button>
+    </Stack>
   );
 }
+
+export const MovieSearchModal = withModal<Props<Item.Movie>>(
+  ManualSearchView,
+  "movie-manual-search",
+  { title: "Search Subtitles", size: "xl" }
+);
+export const EpisodeSearchModal = withModal<Props<Item.Episode>>(
+  ManualSearchView,
+  "episode-manual-search",
+  { title: "Search Subtitles", size: "xl" }
+);
 
 const StateIcon: FunctionComponent<{ matches: string[]; dont: string[] }> = ({
   matches,
   dont,
 }) => {
-  let icon = faCheck;
-  let color = "var(--success)";
-  if (dont.length > 0) {
-    icon = faInfoCircle;
-    color = "var(--warning)";
-  }
+  const hasIssues = dont.length > 0;
 
-  const matchElements = useMemo(
-    () =>
-      matches.map((v, idx) => (
-        <p key={`match-${idx}`} className="text-nowrap m-0">
-          {v}
-        </p>
-      )),
-    [matches]
-  );
-  const dontElements = useMemo(
-    () =>
-      dont.map((v, idx) => (
-        <p key={`dont-${idx}`} className="text-nowrap m-0">
-          {v}
-        </p>
-      )),
-    [dont]
-  );
-
-  const popover = useMemo(
-    () => (
-      <Popover className="w-100" id="manual-search-matches-info">
-        <Popover.Content>
-          <Container fluid>
-            <Row>
-              <Col xs={6}>
-                <FontAwesomeIcon
-                  color="var(--success)"
-                  icon={faCheck}
-                ></FontAwesomeIcon>
-                {matchElements}
-              </Col>
-              <Col xs={6}>
-                <FontAwesomeIcon
-                  color="var(--danger)"
-                  icon={faTimes}
-                ></FontAwesomeIcon>
-                {dontElements}
-              </Col>
-            </Row>
-          </Container>
-        </Popover.Content>
-      </Popover>
-    ),
-    [matchElements, dontElements]
-  );
+  const { ref, hovered } = useHover();
 
   return (
-    <OverlayTrigger overlay={popover} placement={"left"}>
-      <FontAwesomeIcon icon={icon} color={color}></FontAwesomeIcon>
-    </OverlayTrigger>
+    <Popover opened={hovered} position="top" width={360} withArrow>
+      <Popover.Target>
+        <Text color={hasIssues ? "yellow" : "green"} ref={ref}>
+          <FontAwesomeIcon
+            icon={hasIssues ? faExclamationCircle : faCheckCircle}
+          ></FontAwesomeIcon>
+        </Text>
+      </Popover.Target>
+      <Popover.Dropdown>
+        <Group position="left" spacing="xl" noWrap grow>
+          <Stack align="flex-start" justify="flex-start" spacing="xs" mb="auto">
+            <Text color="green">
+              <FontAwesomeIcon icon={faCheck}></FontAwesomeIcon>
+            </Text>
+            <List>
+              {matches.map((v, idx) => (
+                <List.Item key={BuildKey(idx, v, "match")}>{v}</List.Item>
+              ))}
+            </List>
+          </Stack>
+          <Stack align="flex-start" justify="flex-start" spacing="xs" mb="auto">
+            <Text color="yellow">
+              <FontAwesomeIcon icon={faTimes}></FontAwesomeIcon>
+            </Text>
+            <List>
+              {dont.map((v, idx) => (
+                <List.Item key={BuildKey(idx, v, "miss")}>{v}</List.Item>
+              ))}
+            </List>
+          </Stack>
+        </Group>
+      </Popover.Dropdown>
+    </Popover>
   );
 };

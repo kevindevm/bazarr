@@ -1,4 +1,4 @@
-import { useLanguageProfiles, useLanguages } from "apis/hooks";
+import { useLanguageProfiles, useLanguages } from "@/apis/hooks";
 import { useMemo } from "react";
 
 export function useLanguageProfileBy(id: number | null | undefined) {
@@ -13,7 +13,7 @@ export function useEnabledLanguages() {
     const data: Language.Info[] =
       query.data
         ?.filter((v) => v.enabled)
-        .map((v) => ({ code2: v.code2, name: v.name })) ?? [];
+        .map<Language.Info>((v) => ({ code2: v.code2, name: v.name })) ?? [];
 
     return {
       ...query,
@@ -22,11 +22,6 @@ export function useEnabledLanguages() {
   }, [query]);
 
   return enabled;
-}
-
-export function useLanguageBy(code?: string) {
-  const { data } = useLanguages();
-  return useMemo(() => data?.find((v) => v.code2 === code), [data, code]);
 }
 
 // Convert languageprofile items to language

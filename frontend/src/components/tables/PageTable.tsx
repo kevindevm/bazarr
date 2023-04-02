@@ -1,85 +1,52 @@
-import React, { useEffect } from "react";
-import {
-  PluginHook,
-  TableOptions,
-  usePagination,
-  useRowSelect,
-  useTable,
-} from "react-table";
-import { ScrollToTop } from "utilities";
-import BaseTable, { TableStyleProps, useStyleAndOptions } from "./BaseTable";
+import { ScrollToTop } from "@/utilities";
+import { useEffect } from "react";
+import { usePagination, useTable } from "react-table";
+import BaseTable from "./BaseTable";
 import PageControl from "./PageControl";
-import { useCustomSelection, useDefaultSettings } from "./plugins";
+import { useDefaultSettings } from "./plugins";
+import { SimpleTableProps } from "./SimpleTable";
 
-type Props<T extends object> = TableOptions<T> &
-  TableStyleProps<T> & {
-    canSelect?: boolean;
-    autoScroll?: boolean;
-    plugins?: PluginHook<T>[];
-  };
+type Props<T extends object> = SimpleTableProps<T> & {
+  autoScroll?: boolean;
+};
+
+const tablePlugins = [useDefaultSettings, usePagination];
 
 export default function PageTable<T extends object>(props: Props<T>) {
-  const { autoScroll, canSelect, plugins, ...remain } = props;
-  const { style, options } = useStyleAndOptions(remain);
+  const { autoScroll = true, plugins, instanceRef, ...options } = props;
 
-  const allPlugins: PluginHook<T>[] = [useDefaultSettings, usePagination];
+  const instance = useTable(
+    options,
+    useDefaultSettings,
+    ...tablePlugins,
+    ...(plugins ?? [])
+  );
 
-  if (canSelect) {
-    allPlugins.push(useRowSelect, useCustomSelection);
+  if (instanceRef) {
+    instanceRef.current = instance;
   }
-
-  if (plugins) {
-    allPlugins.push(...plugins);
-  }
-
-  const instance = useTable(options, ...allPlugins);
-
-  const {
-    getTableProps,
-    getTableBodyProps,
-    headerGroups,
-    rows,
-    prepareRow,
-
-    // page
-    page,
-    canNextPage,
-    canPreviousPage,
-    pageCount,
-    gotoPage,
-    nextPage,
-    previousPage,
-    state: { pageIndex, pageSize },
-  } = instance;
 
   // Scroll to top when page is changed
   useEffect(() => {
     if (autoScroll) {
       ScrollToTop();
     }
-  }, [pageIndex, autoScroll]);
+  }, [instance.state.pageIndex, autoScroll]);
 
   return (
-    <React.Fragment>
+    <>
       <BaseTable
-        {...style}
-        headers={headerGroups}
-        rows={page}
-        prepareRow={prepareRow}
-        tableProps={getTableProps()}
-        tableBodyProps={getTableBodyProps()}
+        {...options}
+        {...instance}
+        plugins={[...tablePlugins, ...(plugins ?? [])]}
       ></BaseTable>
       <PageControl
-        count={pageCount}
-        index={pageIndex}
-        size={pageSize}
-        total={rows.length}
-        canPrevious={canPreviousPage}
-        canNext={canNextPage}
-        previous={previousPage}
-        next={nextPage}
-        goto={gotoPage}
+        count={instance.pageCount}
+        index={instance.state.pageIndex}
+        size={instance.state.pageSize}
+        total={instance.rows.length}
+        goto={instance.gotoPage}
       ></PageControl>
-    </React.Fragment>
+    </>
   );
 }

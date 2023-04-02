@@ -1,35 +1,39 @@
-import { faInfoCircle, faRecycle } from "@fortawesome/free-solid-svg-icons";
+/* eslint-disable camelcase */
+import { useMovieAddBlacklist, useMovieHistoryPagination } from "@/apis/hooks";
+import { MutateAction } from "@/components/async";
+import { HistoryIcon } from "@/components/bazarr";
+import Language from "@/components/bazarr/Language";
+import TextPopover from "@/components/TextPopover";
+import HistoryView from "@/pages/views/HistoryView";
+import { useTableStyles } from "@/styles";
+import {
+  faFileExcel,
+  faInfoCircle,
+  faRecycle,
+} from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useMovieAddBlacklist, useMovieHistoryPagination } from "apis/hooks";
-import { HistoryIcon, LanguageText, TextPopover } from "components";
-import { BlacklistButton } from "components/inputs/blacklist";
-import HistoryView from "components/views/HistoryView";
-import React, { FunctionComponent, useMemo } from "react";
-import { Badge, OverlayTrigger, Popover } from "react-bootstrap";
+import { Anchor, Badge, Text } from "@mantine/core";
+import { FunctionComponent, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { Column } from "react-table";
 
-interface Props {}
-
-const MoviesHistoryView: FunctionComponent<Props> = () => {
+const MoviesHistoryView: FunctionComponent = () => {
   const columns: Column<History.Movie>[] = useMemo<Column<History.Movie>[]>(
     () => [
       {
         accessor: "action",
-        className: "text-center",
         Cell: (row) => <HistoryIcon action={row.value}></HistoryIcon>,
       },
       {
         Header: "Name",
         accessor: "title",
-        className: "text-nowrap",
-        Cell: (row) => {
-          const target = `/movies/${row.row.original.radarrId}`;
-
+        Cell: ({ row, value }) => {
+          const { classes } = useTableStyles();
+          const target = `/movies/${row.original.radarrId}`;
           return (
-            <Link to={target}>
-              <span>{row.value}</span>
-            </Link>
+            <Anchor className={classes.primary} component={Link} to={target}>
+              {value}
+            </Anchor>
           );
         },
       },
@@ -39,8 +43,8 @@ const MoviesHistoryView: FunctionComponent<Props> = () => {
         Cell: ({ value }) => {
           if (value) {
             return (
-              <Badge variant="secondary">
-                <LanguageText text={value} long></LanguageText>
+              <Badge>
+                <Language.Text value={value} long></Language.Text>
               </Badge>
             );
           } else {
@@ -58,8 +62,8 @@ const MoviesHistoryView: FunctionComponent<Props> = () => {
         Cell: (row) => {
           if (row.value) {
             return (
-              <TextPopover text={row.row.original.parsed_timestamp} delay={1}>
-                <span>{row.value}</span>
+              <TextPopover text={row.row.original.parsed_timestamp}>
+                <Text>{row.value}</Text>
               </TextPopover>
             );
           } else {
@@ -69,34 +73,22 @@ const MoviesHistoryView: FunctionComponent<Props> = () => {
       },
       {
         accessor: "description",
-        Cell: ({ row, value }) => {
-          const overlay = (
-            <Popover id={`description-${row.id}`}>
-              <Popover.Content>{value}</Popover.Content>
-            </Popover>
-          );
+        Cell: ({ value }) => {
           return (
-            <OverlayTrigger overlay={overlay}>
+            <TextPopover text={value}>
               <FontAwesomeIcon size="sm" icon={faInfoCircle}></FontAwesomeIcon>
-            </OverlayTrigger>
+            </TextPopover>
           );
         },
       },
       {
         accessor: "upgradable",
         Cell: (row) => {
-          const overlay = (
-            <Popover id={`description-${row.row.id}`}>
-              <Popover.Content>
-                This Subtitles File Is Eligible For An Upgrade.
-              </Popover.Content>
-            </Popover>
-          );
           if (row.value) {
             return (
-              <OverlayTrigger overlay={overlay}>
+              <TextPopover text="This Subtitles File Is Eligible For An Upgrade.">
                 <FontAwesomeIcon size="sm" icon={faRecycle}></FontAwesomeIcon>
-              </OverlayTrigger>
+              </TextPopover>
             );
           } else {
             return null;
@@ -105,15 +97,32 @@ const MoviesHistoryView: FunctionComponent<Props> = () => {
       },
       {
         accessor: "blacklisted",
-        Cell: ({ row }) => {
-          const { radarrId } = row.original;
-          const { mutateAsync } = useMovieAddBlacklist();
-          return (
-            <BlacklistButton
-              history={row.original}
-              promise={(form) => mutateAsync({ id: radarrId, form })}
-            ></BlacklistButton>
-          );
+        Cell: ({ row, value }) => {
+          const add = useMovieAddBlacklist();
+          const { radarrId, provider, subs_id, language, subtitles_path } =
+            row.original;
+
+          if (subs_id && provider && language) {
+            return (
+              <MutateAction
+                label="Add to Blacklist"
+                disabled={value}
+                icon={faFileExcel}
+                mutation={add}
+                args={() => ({
+                  id: radarrId,
+                  form: {
+                    provider,
+                    subs_id,
+                    subtitles_path,
+                    language: language.code2,
+                  },
+                })}
+              ></MutateAction>
+            );
+          } else {
+            return null;
+          }
         },
       },
     ],

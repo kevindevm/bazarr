@@ -10,6 +10,8 @@ import api from "../raw";
 
 const cacheEpisodes = (client: QueryClient, episodes: Item.Episode[]) => {
   episodes.forEach((item) => {
+    client.setQueryData([QueryKeys.Episodes, item.sonarrEpisodeId], item);
+
     client.setQueryData(
       [
         QueryKeys.Series,
@@ -99,7 +101,8 @@ export function useEpisodeDeleteBlacklist() {
 export function useEpisodeHistoryPagination() {
   return usePaginationQuery(
     [QueryKeys.Series, QueryKeys.Episodes, QueryKeys.History],
-    (param) => api.episodes.history(param)
+    (param) => api.episodes.history(param),
+    false
   );
 }
 

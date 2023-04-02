@@ -3,26 +3,45 @@
 import json
 import requests
 import os
-import re
+import logging
 
-from flask import request
-from flask_restful import Resource
+from flask_restx import Resource, Namespace, reqparse
 from bs4 import BeautifulSoup as bso
 
-from database import TableEpisodes, TableShows, TableMovies
-from get_subtitle.mass_download import episode_download_subtitles, movies_download_subtitles
+from app.database import TableEpisodes, TableShows, TableMovies
+from subtitles.mass_download import episode_download_subtitles, movies_download_subtitles
+
 from ..utils import authenticate
 
 
+api_ns_webhooks_plex = Namespace('Webhooks Plex', description='Webhooks endpoint that can be configured in Plex to '
+                                                              'trigger a subtitles search when playback start.')
+
+
+@api_ns_webhooks_plex.route('webhooks/plex')
 class WebHooksPlex(Resource):
+    post_request_parser = reqparse.RequestParser()
+    post_request_parser.add_argument('payload', type=str, required=True, help='Webhook payload')
+
     @authenticate
+    @api_ns_webhooks_plex.doc(parser=post_request_parser)
+    @api_ns_webhooks_plex.response(200, 'Success')
+    @api_ns_webhooks_plex.response(204, 'Unhandled event')
+    @api_ns_webhooks_plex.response(400, 'No GUID found')
+    @api_ns_webhooks_plex.response(401, 'Not Authenticated')
+    @api_ns_webhooks_plex.response(404, 'IMDB series/movie ID not found')
     def post(self):
-        json_webhook = request.form.get('payload')
+        """Trigger subtitles search on play media event in Plex"""
+        args = self.post_request_parser.parse_args()
+        json_webhook = args.get('payload')
         parsed_json_webhook = json.loads(json_webhook)
+        if 'Guid' not in parsed_json_webhook['Metadata']:
+            logging.debug('No GUID provided in Plex json payload. Probably a pre-roll video.')
+            return "No GUID found in JSON request body", 200
 
         event = parsed_json_webhook['event']
         if event not in ['media.play']:
-            return '', 204
+            return 'Unhandled event', 204
 
         media_type = parsed_json_webhook['Metadata']['type']
 
@@ -38,7 +57,7 @@ class WebHooksPlex(Resource):
             if len(splitted_id) == 2:
                 ids.append({splitted_id[0]: splitted_id[1]})
         if not ids:
-            return '', 404
+            return 'No GUID found', 400
 
         if media_type == 'episode':
             try:
@@ -46,9 +65,13 @@ class WebHooksPlex(Resource):
                 r = requests.get('https://imdb.com/title/{}'.format(episode_imdb_id),
                                  headers={"User-Agent": os.environ["SZ_USER_AGENT"]})
                 soup = bso(r.content, "html.parser")
-                series_imdb_id = soup.find('a', {'class': re.compile(r'SeriesParentLink__ParentTextLink')})['href'].split('/')[2]
+                script_tag = soup.find(id='__NEXT_DATA__')
+                script_tag_json = script_tag.string
+                show_metadata_dict = json.loads(script_tag_json)
+                series_imdb_id = show_metadata_dict['props']['pageProps']['aboveTheFoldData']['series']['series']['id']
             except Exception:
-                return '', 404
+                logging.debug('BAZARR is unable to get series IMDB id.')
+                return 'IMDB series ID not found', 404
             else:
                 sonarrEpisodeId = TableEpisodes.select(TableEpisodes.sonarrEpisodeId) \
                     .join(TableShows, on=(TableEpisodes.sonarrSeriesId == TableShows.sonarrSeriesId)) \
@@ -64,7 +87,8 @@ class WebHooksPlex(Resource):
             try:
                 movie_imdb_id = [x['imdb'] for x in ids if 'imdb' in x][0]
             except Exception:
-                return '', 404
+                logging.debug('BAZARR is unable to get movie IMDB id.')
+                return 'IMDB movie ID not found', 404
             else:
                 radarrId = TableMovies.select(TableMovies.radarrId)\
                     .where(TableMovies.imdbId == movie_imdb_id)\

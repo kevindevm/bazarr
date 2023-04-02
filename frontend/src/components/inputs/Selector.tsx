@@ -1,111 +1,176 @@
-import { isArray } from "lodash";
-import React, { useCallback, useMemo } from "react";
-import Select from "react-select";
-import { SelectComponents } from "react-select/dist/declarations/src/components";
-import "./selector.scss";
+import { LOG } from "@/utilities/console";
+import {
+  MultiSelect,
+  MultiSelectProps,
+  Select,
+  SelectItem,
+  SelectProps,
+} from "@mantine/core";
+import { isNull, isUndefined } from "lodash";
+import { useCallback, useMemo, useRef } from "react";
 
-export interface SelectorProps<T, M extends boolean> {
-  className?: string;
-  placeholder?: string;
-  options: readonly SelectorOption<T>[];
-  disabled?: boolean;
-  clearable?: boolean;
-  loading?: boolean;
-  multiple?: M;
-  onChange?: (k: SelectorValueType<T, M>) => void;
-  onFocus?: (e: React.FocusEvent<HTMLElement>) => void;
-  label?: (item: T) => string;
-  defaultValue?: SelectorValueType<T, M>;
-  value?: SelectorValueType<T, M>;
-  components?: Partial<SelectComponents<T, M, any>>;
+export type SelectorOption<T> = Override<
+  {
+    value: T;
+    label: string;
+  },
+  SelectItem
+>;
+
+type SelectItemWithPayload<T> = SelectItem & {
+  payload: T;
+};
+
+function DefaultKeyBuilder<T>(value: T) {
+  if (typeof value === "string") {
+    return value;
+  } else if (typeof value === "number") {
+    return value.toString();
+  } else {
+    LOG("error", "Unknown value type", value);
+    throw new Error(
+      `Invalid type (${typeof value}) in the SelectorOption, please provide a label builder`
+    );
+  }
 }
 
-export function Selector<T = string, M extends boolean = false>(
-  props: SelectorProps<T, M>
-) {
-  const {
-    className,
-    placeholder,
-    label,
-    disabled,
-    clearable,
-    loading,
-    options,
-    multiple,
-    onChange,
-    onFocus,
-    defaultValue,
-    components,
-    value,
-  } = props;
+export type SelectorProps<T> = Override<
+  {
+    value?: T | null;
+    defaultValue?: T | null;
+    options: SelectorOption<T>[];
+    onChange?: (value: T | null) => void;
+    getkey?: (value: T) => string;
+  },
+  Omit<SelectProps, "data">
+>;
 
-  const nameFromItems = useCallback(
-    (item: T) => {
-      return options.find((v) => v.value === item)?.label;
-    },
-    [options]
+export function Selector<T>({
+  value,
+  defaultValue,
+  options,
+  onChange,
+  getkey = DefaultKeyBuilder,
+  ...select
+}: SelectorProps<T>) {
+  const keyRef = useRef(getkey);
+  keyRef.current = getkey;
+
+  const data = useMemo(
+    () =>
+      options.map<SelectItemWithPayload<T>>(({ value, label, ...option }) => ({
+        label,
+        value: keyRef.current(value),
+        payload: value,
+        ...option,
+      })),
+    [keyRef, options]
   );
 
-  // TODO: Force as any
-  const wrapper = useCallback(
-    (value: SelectorValueType<T, M> | undefined | null): any => {
-      if (value !== null && value !== undefined) {
-        if (multiple) {
-          return (value as SelectorValueType<T, true>).map((v) => ({
-            label: label ? label(v) : nameFromItems(v) ?? "Unknown",
-            value: v,
-          }));
-        } else {
-          const v = value as T;
-          return {
-            label: label ? label(v) : nameFromItems(v) ?? "Unknown",
-            value: v,
-          };
-        }
-      }
-
+  const wrappedValue = useMemo(() => {
+    if (isNull(value) || isUndefined(value)) {
       return value;
+    } else {
+      return keyRef.current(value);
+    }
+  }, [keyRef, value]);
+
+  const wrappedDefaultValue = useMemo(() => {
+    if (isNull(defaultValue) || isUndefined(defaultValue)) {
+      return defaultValue;
+    } else {
+      return keyRef.current(defaultValue);
+    }
+  }, [defaultValue, keyRef]);
+
+  const wrappedOnChange = useCallback(
+    (value: string) => {
+      const payload = data.find((v) => v.value === value)?.payload ?? null;
+      onChange?.(payload);
     },
-    [label, multiple, nameFromItems]
+    [data, onChange]
   );
-
-  const defaultWrapper = useMemo(
-    () => wrapper(defaultValue),
-    [defaultValue, wrapper]
-  );
-
-  const valueWrapper = useMemo(() => wrapper(value), [wrapper, value]);
 
   return (
     <Select
-      isLoading={loading}
-      placeholder={placeholder}
-      isSearchable={options.length >= 10}
-      isMulti={multiple}
-      closeMenuOnSelect={!multiple}
-      defaultValue={defaultWrapper}
-      value={valueWrapper}
-      isClearable={clearable}
-      isDisabled={disabled}
-      options={options}
-      components={components}
-      className={`custom-selector w-100 ${className ?? ""}`}
-      classNamePrefix="selector"
-      onFocus={onFocus}
-      onChange={(v: SelectorOption<T>[]) => {
-        if (onChange) {
-          let res: T | T[] | null = null;
-          if (isArray(v)) {
-            res = (v as ReadonlyArray<SelectorOption<T>>).map(
-              (val) => val.value
-            );
-          } else {
-            res = (v as SelectorOption<T>)?.value ?? null;
-          }
-          // TODO: Force as any
-          onChange(res as any);
-        }
-      }}
+      data={data}
+      defaultValue={wrappedDefaultValue}
+      value={wrappedValue}
+      onChange={wrappedOnChange}
+      {...select}
     ></Select>
+  );
+}
+
+export type MultiSelectorProps<T> = Override<
+  {
+    value?: readonly T[];
+    defaultValue?: readonly T[];
+    options: readonly SelectorOption<T>[];
+    onChange?: (value: T[]) => void;
+    getkey?: (value: T) => string;
+    buildOption?: (value: string) => T;
+  },
+  Omit<MultiSelectProps, "data">
+>;
+
+export function MultiSelector<T>({
+  value,
+  defaultValue,
+  options,
+  onChange,
+  getkey = DefaultKeyBuilder,
+  buildOption,
+  ...select
+}: MultiSelectorProps<T>) {
+  const labelRef = useRef(getkey);
+  labelRef.current = getkey;
+
+  const buildRef = useRef(buildOption);
+  buildRef.current = buildOption;
+
+  const data = useMemo(
+    () =>
+      options.map<SelectItemWithPayload<T>>(({ value, ...option }) => ({
+        value: labelRef.current(value),
+        payload: value,
+        ...option,
+      })),
+    [options]
+  );
+
+  const wrappedValue = useMemo(
+    () => value && value.map(labelRef.current),
+    [value]
+  );
+  const wrappedDefaultValue = useMemo(
+    () => defaultValue && defaultValue.map(labelRef.current),
+    [defaultValue]
+  );
+
+  const wrappedOnChange = useCallback(
+    (values: string[]) => {
+      const payloads: T[] = [];
+      for (const value of values) {
+        const payload = data.find((v) => v.value === value)?.payload;
+        if (payload) {
+          payloads.push(payload);
+        } else if (buildRef.current) {
+          payloads.push(buildRef.current(value));
+        }
+      }
+      onChange?.(payloads);
+    },
+    [data, onChange]
+  );
+
+  return (
+    <MultiSelect
+      {...select}
+      value={wrappedValue}
+      defaultValue={wrappedDefaultValue}
+      onChange={wrappedOnChange}
+      data={data}
+    ></MultiSelect>
   );
 }

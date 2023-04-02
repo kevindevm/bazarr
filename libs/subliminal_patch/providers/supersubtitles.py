@@ -1,31 +1,34 @@
 # coding=utf-8
-import io
 import logging
+from random import randint
 import re
 import time
+import urllib.parse
 
 from babelfish import language_converters
-from subzero.language import Language
+from bs4.element import NavigableString
+from bs4.element import Tag
+from guessit import guessit
 from requests import Session
 from requests.exceptions import JSONDecodeError
-import urllib.parse
-from random import randint
-
-from subliminal.subtitle import fix_line_ending
+from subliminal.providers import ParserBeautifulSoup
+from subliminal.score import get_equivalent_release_groups
+from subliminal.utils import sanitize
+from subliminal.utils import sanitize_release_group
+from subliminal.video import Episode
+from subliminal.video import Movie
+from subliminal_patch.exceptions import APIThrottled
 from subliminal_patch.providers import Provider
 from subliminal_patch.providers.mixins import ProviderSubtitleArchiveMixin
-from subliminal.providers import ParserBeautifulSoup
-from bs4.element import Tag, NavigableString
-from subliminal.score import get_equivalent_release_groups
-from subliminal_patch.subtitle import Subtitle, guess_matches
-from subliminal.utils import sanitize, sanitize_release_group
-from subliminal.video import Episode, Movie
-from zipfile import ZipFile
-from rarfile import RarFile, is_rarfile
-from subliminal_patch.utils import sanitize, fix_inconsistent_naming
-from guessit import guessit
-from .utils import FIRST_THOUSAND_OR_SO_USER_AGENTS as AGENT_LIST
+from subliminal_patch.subtitle import Subtitle
+from subliminal_patch.utils import fix_inconsistent_naming
+from subliminal_patch.utils import sanitize
+from subzero.language import Language
 
+from .utils import FIRST_THOUSAND_OR_SO_USER_AGENTS as AGENT_LIST
+from .utils import get_archive_from_bytes
+from .utils import get_subtitle_from_archive
+from .utils import update_matches
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +80,7 @@ class SuperSubtitlesSubtitle(Subtitle):
         self.season = season
         self.episode = episode
         self.version = version
-        self.releases = releases
+        self.releases = releases or []
         self.year = year
         self.uploader = uploader
         if year:
@@ -90,7 +93,7 @@ class SuperSubtitlesSubtitle(Subtitle):
         self.asked_for_episode = asked_for_episode
         self.imdb_id = imdb_id
         self.is_pack = True
-        self.matches = None
+        self.matches = set()
 
     def numeric_id(self):
         return self.subtitle_id
@@ -108,8 +111,8 @@ class SuperSubtitlesSubtitle(Subtitle):
         return str(self.subtitle_id)
 
     def get_matches(self, video):
-        type_ = "movie" if isinstance(video, Movie) else "episode"
-        matches = guess_matches(video, guessit(self.release_info, {"type": type_}))
+        matches = set()
+        update_matches(matches, video, self.releases)
 
         # episode
         if isinstance(video, Episode):
@@ -167,8 +170,8 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
         'hun', 'eng'
     ]}
     video_types = (Episode, Movie)
-    # https://www.feliratok.info/?search=&soriSorszam=&nyelv=&sorozatnev=The+Flash+%282014%29&sid=3212&complexsearch=true&knyelv=0&evad=4&epizod1=1&cimke=0&minoseg=0&rlsr=0&tab=all
-    server_url = 'https://www.feliratok.info/'
+    # https://www.feliratok.eu/?search=&soriSorszam=&nyelv=&sorozatnev=The+Flash+%282014%29&sid=3212&complexsearch=true&knyelv=0&evad=4&epizod1=1&cimke=0&minoseg=0&rlsr=0&tab=all
+    server_url = 'https://www.feliratok.eu/'
     hearing_impaired_verifiable = False
     multi_result_throttle = 2  # seconds
 
@@ -179,7 +182,7 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
         self.session = Session()
         self.session.headers = {
             'User-Agent': AGENT_LIST[randint(0, len(AGENT_LIST) - 1)],
-            'Referer': 'https://www.feliratok.info/index.php'
+            'Referer': 'https://www.feliratok.eu/index.php'
         }
 
     def terminate(self):
@@ -197,9 +200,10 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
         """
 
         """
+        # TODO: add memoization to this method logic
 
         url = self.server_url + "index.php?tipus=adatlap&azon=a_" + str(sub_id)
-        # url = https://www.feliratok.info/index.php?tipus=adatlap&azon=a_1518600916
+        # url = https://www.feliratok.eu/index.php?tipus=adatlap&azon=a_1518600916
         logger.info('Get IMDB id from URL %s', url)
         r = self.session.get(url, timeout=10).content
 
@@ -212,6 +216,7 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
                 # src="img/adatlap/imdb.png"/></a>
                 imdb_id = re.search(r'(?<=www\.imdb\.com/title/).*(?=/")', str(value))
                 imdb_id = imdb_id.group() if imdb_id else ''
+                logger.debug("IMDB ID found: %s", imdb_id)
                 return imdb_id
 
         return None
@@ -219,7 +224,7 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
     def find_id(self, series, year, original_title):
         """
         We need to find the id of the series at the following url:
-        https://www.feliratok.info/index.php?term=SERIESNAME&nyelv=0&action=autoname
+        https://www.feliratok.eu/index.php?term=SERIESNAME&nyelv=0&action=autoname
         Where SERIESNAME is a searchable string.
         The result will be something like this:
         [{"name":"DC\u2019s Legends of Tomorrow (2016)","ID":"3725"},{"name":"Miles from Tomorrowland (2015)",
@@ -307,7 +312,7 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
         if isinstance(video, Movie):
             title = urllib.parse.quote_plus(series)
 
-            # https://www.feliratok.info/index.php?search=The+Hitman%27s+BodyGuard&soriSorszam=&nyelv=&tab=film
+            # https://www.feliratok.eu/index.php?search=The+Hitman%27s+BodyGuard&soriSorszam=&nyelv=&tab=film
             url = self.server_url + "index.php?search=" + title + "&soriSorszam=&nyelv=&tab=film"
             subtitle = self.process_subs(languages, video, url)
 
@@ -369,7 +374,7 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
     def get_subtitle_list(self, series_id, season, episode, video):
         """
         We can retrieve the list of subtitles for a given show via the following url:
-        https://www.feliratok.info/index.php?action=xbmc&sid=SERIES_ID&ev=SEASON&rtol=EPISODE
+        https://www.feliratok.eu/index.php?action=xbmc&sid=SERIES_ID&ev=SEASON&rtol=EPISODE
         SERIES_ID is the ID of the show returned by the @find_id method. It is a mandatory parameter.
         SEASON is the season number. Optional paramter.
         EPISODE is the episode number. Optional parameter (using this param can cause problems).
@@ -391,12 +396,12 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
             results = None
 
         '''
-        The result will be a JSON like this:
-        [{
+        In order to work, the result should be a JSON like this:
+        {
             "10": {
                 "language":"Angol",
                 "nev":"The Flash (Season 5) (1080p)",
-                "baselink":"http://www.feliratok.info/index.php",
+                "baselink":"http://www.feliratok.eu/index.php",
                 "fnev":"The.Flash.S05.HDTV.WEB.720p.1080p.ENG.zip",
                 "felirat":"1560706755",
                 "evad":"5",
@@ -404,15 +409,15 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
                 "feltolto":"J1GG4",
                 "pontos_talalat":"111",
                 "evadpakk":"1"
-            }
-        },...]
+            }, ...
+        }
         '''
 
         subtitle_list = {}
         season_pack_list = {}
 
-        # Check the results:
-        if results:
+        # Check the results. If a list or a Nonetype is returned, ignore it:
+        if results and not isinstance(results, list):
             for result in results.values():
                 '''
                 Gonna get back multiple records for the same subtitle, in case it is compatible with multiple releases,
@@ -446,6 +451,8 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
                     }
                 else:
                     target[sub_id]['releases'].append(release)
+        else:
+            logger.debug("Invalid results: %s", results)
 
         return subtitle_list, season_pack_list
 
@@ -538,21 +545,12 @@ class SuperSubtitlesProvider(Provider, ProviderSubtitleArchiveMixin):
             return subtitles
 
     def download_subtitle(self, subtitle):
-
-        # download as a zip
-        logger.info('Downloading subtitle %r', subtitle.subtitle_id)
         r = self.session.get(subtitle.page_link, timeout=10)
         r.raise_for_status()
 
-        if ".rar" in subtitle.page_link:
-            logger.debug('Archive identified as rar')
-            archive_stream = io.BytesIO(r.content)
-            archive = RarFile(archive_stream)
-            subtitle.content = self.get_subtitle_from_archive(subtitle, archive)
-        elif ".zip" in subtitle.page_link:
-            logger.debug('Archive identified as zip')
-            archive_stream = io.BytesIO(r.content)
-            archive = ZipFile(archive_stream)
-            subtitle.content = self.get_subtitle_from_archive(subtitle, archive)
-        else:
-            subtitle.content = fix_line_ending(r.content)
+        archive = get_archive_from_bytes(r.content)
+
+        if archive is None:
+            raise APIThrottled(f"Invalid archive from {subtitle.page_link}")
+
+        subtitle.content = get_subtitle_from_archive(archive, episode=subtitle.episode or None)

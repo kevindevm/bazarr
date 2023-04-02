@@ -1,78 +1,65 @@
-import { useReduxStore } from "@redux/hooks/base";
-import logo from "@static/logo128.png";
-import { useSystem } from "apis/hooks";
-import React, { FunctionComponent, useState } from "react";
-import { Button, Card, Form, Image, Spinner } from "react-bootstrap";
-import { Redirect } from "react-router-dom";
-import "./Authentication.scss";
+import { useSystem } from "@/apis/hooks";
+import { Environment } from "@/utilities";
+import {
+  Avatar,
+  Button,
+  Card,
+  Container,
+  Divider,
+  PasswordInput,
+  Stack,
+  TextInput,
+} from "@mantine/core";
+import { useForm } from "@mantine/form";
+import { FunctionComponent } from "react";
 
-interface Props {}
+const Authentication: FunctionComponent = () => {
+  const { login } = useSystem();
 
-const Authentication: FunctionComponent<Props> = () => {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-
-  const { login, isWorking } = useSystem();
-
-  const authenticated = useReduxStore((s) => s.status !== "unauthenticated");
-
-  if (authenticated) {
-    return <Redirect to="/"></Redirect>;
-  }
+  const form = useForm({
+    initialValues: {
+      username: "",
+      password: "",
+    },
+  });
 
   return (
-    <div className="d-flex bg-light vh-100 justify-content-center align-items-center">
-      <Card className="auth-card shadow">
-        <Form
-          onSubmit={(e) => {
-            e.preventDefault();
-            login({ username, password });
-          }}
-        >
-          <Card.Body>
-            <Form.Group className="mb-5 d-flex justify-content-center">
-              <Image width="64" height="64" src={logo}></Image>
-            </Form.Group>
-            <Form.Group>
-              <Form.Control
-                disabled={isWorking}
-                name="username"
-                type="text"
+    <Container my="xl" size={400}>
+      <Card shadow="xl">
+        <Stack>
+          <Avatar
+            mx="auto"
+            size={64}
+            src={`${Environment.baseUrl}/images/logo128.png`}
+          ></Avatar>
+          <Divider></Divider>
+          <form
+            onSubmit={form.onSubmit((values) => {
+              login(values);
+            })}
+          >
+            <Stack>
+              <TextInput
+                name="Username"
                 placeholder="Username"
                 required
-                onChange={(e) => setUsername(e.currentTarget.value)}
-              ></Form.Control>
-            </Form.Group>
-            <Form.Group>
-              <Form.Control
-                disabled={isWorking}
-                name="password"
-                type="password"
-                placeholder="Password"
+                {...form.getInputProps("username")}
+              ></TextInput>
+              <PasswordInput
+                name="Password"
                 required
-                onChange={(e) => setPassword(e.currentTarget.value)}
-              ></Form.Control>
-            </Form.Group>
-            {/* <Collapse in={error.length !== 0}>
-              <div>
-                <Alert variant="danger" className="m-0">
-                  {error}
-                </Alert>
-              </div>
-            </Collapse> */}
-          </Card.Body>
-          <Card.Footer>
-            <Button type="submit" disabled={isWorking} block>
-              {isWorking ? (
-                <Spinner size="sm" animation="border"></Spinner>
-              ) : (
-                "LOGIN"
-              )}
-            </Button>
-          </Card.Footer>
-        </Form>
+                placeholder="Password"
+                {...form.getInputProps("password")}
+              ></PasswordInput>
+              <Divider></Divider>
+              <Button fullWidth uppercase type="submit">
+                Login
+              </Button>
+            </Stack>
+          </form>
+        </Stack>
       </Card>
-    </div>
+    </Container>
   );
 };
 

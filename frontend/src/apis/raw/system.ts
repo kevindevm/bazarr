@@ -34,7 +34,7 @@ class SystemApi extends BaseApi {
     await this.post("/settings", data);
   }
 
-  async languages(history: boolean = false) {
+  async languages(history = false) {
     const response = await this.get<Language.Server[]>("/languages", {
       history,
     });
@@ -85,6 +85,19 @@ class SystemApi extends BaseApi {
 
   async deleteLogs() {
     await this.delete("/logs");
+  }
+
+  async announcements() {
+    const response = await this.get<DataWrapper<System.Announcements[]>>(
+      "/announcements"
+    );
+    return response.data;
+  }
+
+  async addAnnouncementsDismiss(hash: string) {
+    await this.post<DataWrapper<System.Announcements[]>>("/announcements", {
+      hash,
+    });
   }
 
   async tasks() {

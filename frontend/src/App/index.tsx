@@ -1,84 +1,72 @@
-import Socketio from "@modules/socketio";
-import { useNotification } from "@redux/hooks";
-import { useReduxStore } from "@redux/hooks/base";
-import { LoadingIndicator, ModalProvider } from "components";
-import Authentication from "pages/Authentication";
-import LaunchError from "pages/LaunchError";
-import React, { FunctionComponent, useEffect } from "react";
-import { Row } from "react-bootstrap";
-import { Route, Switch } from "react-router";
-import { BrowserRouter, Redirect } from "react-router-dom";
-import { useEffectOnceWhen } from "rooks";
-import { Environment } from "utilities";
-import ErrorBoundary from "../components/ErrorBoundary";
-import Router from "../Router";
-import Sidebar from "../Sidebar";
-import Header from "./Header";
+import AppNavbar from "@/App/Navbar";
+import ErrorBoundary from "@/components/ErrorBoundary";
+import { Layout } from "@/constants";
+import NavbarProvider from "@/contexts/Navbar";
+import OnlineProvider from "@/contexts/Online";
+import { notification } from "@/modules/task";
+import CriticalError from "@/pages/errors/CriticalError";
+import { RouterNames } from "@/Router/RouterNames";
+import { Environment } from "@/utilities";
+import { AppShell } from "@mantine/core";
+import { useWindowEvent } from "@mantine/hooks";
+import { showNotification } from "@mantine/notifications";
+import { FunctionComponent, useEffect, useState } from "react";
+import { Outlet, useNavigate } from "react-router-dom";
+import AppHeader from "./Header";
 
-// Sidebar Toggle
+const App: FunctionComponent = () => {
+  const navigate = useNavigate();
 
-interface Props {}
+  const [criticalError, setCriticalError] = useState<string | null>(null);
+  const [navbar, setNavbar] = useState(false);
+  const [online, setOnline] = useState(true);
 
-const App: FunctionComponent<Props> = () => {
-  const { status } = useReduxStore((s) => s);
+  useWindowEvent("app-critical-error", ({ detail }) => {
+    setCriticalError(detail.message);
+  });
 
-  const notify = useNotification("has-update", 10 * 1000);
-
-  // Has any update?
-  useEffectOnceWhen(() => {
-    if (Environment.hasUpdate) {
-      notify({
-        type: "info",
-        message: "A new version of Bazarr is ready, restart is required",
-        // TODO: Restart action
-      });
+  useWindowEvent("app-auth-changed", (ev) => {
+    if (!ev.detail.authenticated) {
+      navigate(RouterNames.Auth);
     }
-  }, status === "initialized");
+  });
 
-  if (status === "unauthenticated") {
-    return <Redirect to="/login"></Redirect>;
-  } else if (status === "uninitialized") {
-    return (
-      <LoadingIndicator>
-        <span>Please wait</span>
-      </LoadingIndicator>
-    );
-  } else if (status === "error") {
-    return <LaunchError>Cannot Initialize Bazarr</LaunchError>;
+  useWindowEvent("app-online-status", ({ detail }) => {
+    setOnline(detail.online);
+  });
+
+  useEffect(() => {
+    if (Environment.hasUpdate) {
+      showNotification(
+        notification.info(
+          "Update available",
+          "A new version of Bazarr is ready, restart is required"
+        )
+      );
+    }
+  }, []);
+
+  if (criticalError !== null) {
+    return <CriticalError message={criticalError}></CriticalError>;
   }
 
   return (
     <ErrorBoundary>
-      <Row noGutters className="header-container">
-        <Header></Header>
-      </Row>
-      <Row noGutters className="flex-nowrap">
-        <Sidebar></Sidebar>
-        <ModalProvider>
-          <Router></Router>
-        </ModalProvider>
-      </Row>
+      <NavbarProvider value={{ showed: navbar, show: setNavbar }}>
+        <OnlineProvider value={{ online, setOnline }}>
+          <AppShell
+            navbarOffsetBreakpoint={Layout.MOBILE_BREAKPOINT}
+            header={<AppHeader></AppHeader>}
+            navbar={<AppNavbar></AppNavbar>}
+            padding={0}
+            fixed
+          >
+            <Outlet></Outlet>
+          </AppShell>
+        </OnlineProvider>
+      </NavbarProvider>
     </ErrorBoundary>
   );
 };
 
-const MainRouter: FunctionComponent = () => {
-  useEffect(() => {
-    Socketio.initialize();
-  }, []);
-
-  return (
-    <BrowserRouter basename={Environment.baseUrl}>
-      <Switch>
-        <Route exact path="/login">
-          <Authentication></Authentication>
-        </Route>
-        <Route path="/">
-          <App></App>
-        </Route>
-      </Switch>
-    </BrowserRouter>
-  );
-};
-
-export default MainRouter;
+export default App;

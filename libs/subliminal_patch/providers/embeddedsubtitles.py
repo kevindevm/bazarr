@@ -3,20 +3,20 @@
 import functools
 import logging
 import os
+import re
 import shutil
 import tempfile
+from typing import List
 
 from babelfish import language_converters
-import fese
-from fese import check_integrity
+from fese import container
 from fese import FFprobeSubtitleStream
 from fese import FFprobeVideoContainer
-from fese import InvalidFile
-from fese import to_srt
+from fese import tags
+from fese.exceptions import InvalidSource
 from subliminal.subtitle import fix_line_ending
 from subliminal_patch.core import Episode
 from subliminal_patch.core import Movie
-from subliminal_patch.exceptions import MustGetBlacklisted
 from subliminal_patch.providers import Provider
 from subliminal_patch.subtitle import Subtitle
 from subzero.language import Language
@@ -24,7 +24,7 @@ from subzero.language import Language
 logger = logging.getLogger(__name__)
 
 # Replace Babelfish's Language with Subzero's Language
-fese.Language = Language
+tags.Language = Language
 
 
 class EmbeddedSubtitle(Subtitle):
@@ -40,7 +40,7 @@ class EmbeddedSubtitle(Subtitle):
         self.container: FFprobeVideoContainer = container
         self.forced = stream.disposition.forced
         self.page_link = self.container.path
-        self.release_info = os.path.basename(self.page_link)
+        self.release_info = _get_pretty_release_name(stream, container)
         self.media_type = media_type
 
         self._matches: set = matches
@@ -55,6 +55,9 @@ class EmbeddedSubtitle(Subtitle):
     @property
     def id(self):
         return f"{self.container.path}_{self.stream.index}"
+
+
+_ALLOWED_CODECS = ("ass", "subrip", "webvtt", "mov_text")
 
 
 class EmbeddedSubtitlesProvider(Provider):
@@ -72,31 +75,39 @@ class EmbeddedSubtitlesProvider(Provider):
 
     def __init__(
         self,
-        include_ass=True,
-        include_srt=True,
+        included_codecs=None,
         cache_dir=None,
         ffprobe_path=None,
         ffmpeg_path=None,
         hi_fallback=False,
-        mergerfs_mode=False,
+        timeout=600,
+        unknown_as_english=False,
     ):
-        self._include_ass = include_ass
-        self._include_srt = include_srt
+        self._included_codecs = set(included_codecs or _ALLOWED_CODECS)
+
+        for codec in self._included_codecs:
+            if codec not in _ALLOWED_CODECS:
+                logger.warning("Unallowed codec: %s", codec)
+
         self._cache_dir = os.path.join(
             cache_dir or tempfile.gettempdir(), self.__class__.__name__.lower()
         )
         self._hi_fallback = hi_fallback
+        self._unknown_as_english = unknown_as_english
         self._cached_paths = {}
-        self._mergerfs_mode = mergerfs_mode
+        self._timeout = int(timeout)
 
-        fese.FFPROBE_PATH = ffprobe_path or fese.FFPROBE_PATH
-        fese.FFMPEG_PATH = ffmpeg_path or fese.FFMPEG_PATH
+        container.FFPROBE_PATH = ffprobe_path or container.FFPROBE_PATH
+        container.FFMPEG_PATH = ffmpeg_path or container.FFMPEG_PATH
 
         if logger.getEffectiveLevel() == logging.DEBUG:
-            fese.FF_LOG_LEVEL = "warning"
+            container.FF_LOG_LEVEL = "warning"
         else:
             # Default is True
-            fese.FFMPEG_STATS = False
+            container.FFMPEG_STATS = False
+
+        tags.LANGUAGE_FALLBACK = "en" if self._unknown_as_english else None
+        logger.debug("Language fallback set: %s", tags.LANGUAGE_FALLBACK)
 
     def initialize(self):
         os.makedirs(self._cache_dir, exist_ok=True)
@@ -109,11 +120,13 @@ class EmbeddedSubtitlesProvider(Provider):
         video = _get_memoized_video_container(path)
 
         try:
-            streams = filter(_check_allowed_extensions, video.get_subtitles())
-        except fese.InvalidSource as error:
+            streams = list(_filter_subtitles(video.get_subtitles()))
+        except InvalidSource as error:
             logger.error("Error trying to get subtitles for %s: %s", video, error)
             self._blacklist.add(path)
             streams = []
+
+        streams = _discard_possible_incomplete_subtitles(streams)
 
         if not streams:
             logger.debug("No subtitles found for container: %s", video)
@@ -124,12 +137,12 @@ class EmbeddedSubtitlesProvider(Provider):
         allowed_streams = []
 
         for stream in streams:
-            if not self._include_ass and stream.extension == "ass":
-                logger.debug("Ignoring ASS: %s", stream)
-                continue
-
-            if not self._include_srt and stream.extension == "srt":
-                logger.debug("Ignoring SRT: %s", stream)
+            if stream.codec_name not in self._included_codecs:
+                logger.debug(
+                    "Ignoring %s (codec not included in %s)",
+                    stream,
+                    self._included_codecs,
+                )
                 continue
 
             if stream.language not in languages:
@@ -171,8 +184,19 @@ class EmbeddedSubtitlesProvider(Provider):
             "series" if isinstance(video, Episode) else "movie",
         )
 
-    def download_subtitle(self, subtitle):
+    def download_subtitle(self, subtitle: EmbeddedSubtitle):
         path = self._get_subtitle_path(subtitle)
+
+        modifiers = _type_modifiers.get(subtitle.stream.codec_name)
+        logger.debug(
+            "Found modifiers for %s type: %s", subtitle.stream.codec_name, modifiers
+        )
+
+        if modifiers is not None:
+            for mod in modifiers:
+                logger.debug("Running %s modifier for %s", mod, path)
+                mod(path, path)
+
         with open(path, "rb") as sub:
             content = sub.read()
             subtitle.content = fix_line_ending(content)
@@ -184,26 +208,20 @@ class EmbeddedSubtitlesProvider(Provider):
         if container.path not in self._cached_paths:
             # Extract all subittle streams to avoid reading the entire
             # container over and over
-            streams = filter(_check_allowed_extensions, container.get_subtitles())
-            extracted = container.extract_subtitles(list(streams), self._cache_dir)
+            subs = list(_filter_subtitles(container.get_subtitles()))
+
+            extracted = container.copy_subtitles(
+                subs,
+                self._cache_dir,
+                timeout=self._timeout,
+                fallback_to_convert=True,
+            )
             # Add the extracted paths to the containter path key
             self._cached_paths[container.path] = extracted
 
         cached_path = self._cached_paths[container.path]
         # Get the subtitle file by index
-        subtitle_path = cached_path[subtitle.stream.index]
-
-        try:
-            check_integrity(subtitle.stream, subtitle_path)
-        except InvalidFile as error:
-            raise MustGetBlacklisted(subtitle.id, subtitle.media_type) from error
-
-        # Convert to SRT if the subtitle is ASS
-        new_subtitle_path = to_srt(subtitle_path, remove_source=True)
-        if new_subtitle_path != subtitle_path:
-            cached_path[subtitle.stream.index] = new_subtitle_path
-
-        return new_subtitle_path
+        return cached_path[subtitle.stream.index]
 
     def _is_path_valid(self, path):
         if path in self._blacklist:
@@ -212,10 +230,6 @@ class EmbeddedSubtitlesProvider(Provider):
 
         if not os.path.isfile(path):
             logger.debug("Inexistent file: %s", path)
-            return False
-
-        if self._mergerfs_mode and _is_fuse_rclone_mount(path):
-            logger.debug("Potential cloud file: %s", path)
             return False
 
         return True
@@ -233,38 +247,111 @@ def _get_memoized_video_container(path: str):
     return _MemoizedFFprobeVideoContainer(path)
 
 
-def _check_allowed_extensions(subtitle: FFprobeSubtitleStream):
-    return subtitle.extension in ("ass", "srt")
+def _filter_subtitles(subtitles: List[FFprobeSubtitleStream]):
+    for subtitle in subtitles:
+        if subtitle.codec_name not in _ALLOWED_CODECS:
+            logger.debug("Unallowed codec: %s", subtitle)
+            continue
+
+        if subtitle.tags.language_fallback is True and any(
+            (subtitle.language == sub.language) and (subtitle.index != sub.index)
+            for sub in subtitles
+        ):
+            logger.debug("Not using language fallback. Language already found")
+            continue
+
+        yield subtitle
 
 
 def _check_hi_fallback(streams, languages):
     for language in languages:
-        compatible_streams = [
-            stream for stream in streams if stream.language == language
-        ]
-        if len(compatible_streams) == 1:
-            stream = compatible_streams[0]
-            logger.debug("HI fallback: updating %s HI to False", stream)
-            stream.disposition.hearing_impaired = False
+        logger.debug("Checking HI fallback for '%s' language", language)
 
-        elif all(stream.disposition.hearing_impaired for stream in streams):
-            for stream in streams:
-                logger.debug("HI fallback: updating %s HI to False", stream)
+        streams_ = [stream for stream in streams if stream.language == language]
+        if len(streams_) == 1 and streams_[0].disposition.hearing_impaired:
+            logger.debug(
+                "HI fallback: updating %s HI to False (only subtitle found is HI)",
+                streams_[0],
+            )
+            streams_[0].disposition.hearing_impaired = False
+            streams_[0].disposition.generic = True
+
+        elif all(stream.disposition.hearing_impaired for stream in streams_):
+            for stream in streams_:
+                logger.debug(
+                    "HI fallback: updating %s HI to False (all subtitles are HI)",
+                    stream,
+                )
                 stream.disposition.hearing_impaired = False
+                stream.disposition.generic = True
 
         else:
-            logger.debug("HI fallback not needed: %s", compatible_streams)
+            logger.debug("HI fallback not needed: %s", streams_)
 
 
-def _is_fuse_rclone_mount(path: str):
-    # Experimental!
+def _discard_possible_incomplete_subtitles(streams):
+    """Check frame properties from subtitle streams in order to find
+    supposedly incomplete subtitles"""
+    try:
+        max_frames = max(stream.tags.frames for stream in streams)
+    except ValueError:
+        return []
 
-    # This function only makes sense if you are combining a rclone mount with a local mount
-    # with mergerfs or similar tools. Don't use it otherwise.
+    # Blatantly assume there's nothing to discard as some ffprobe streams don't
+    # have number_of_frames tags
+    if not max_frames:
+        return streams
 
-    # It tries to guess whether a file is a cloud mount by the length
-    # of the inode number. See the following links for reference.
+    logger.debug("Checking possible incomplete subtitles (max frames: %d)", max_frames)
 
-    # https://forum.rclone.org/t/fuse-inode-number-aufs/215/5
-    # https://pkg.go.dev/bazil.org/fuse/fs?utm_source=godoc#GenerateDynamicInode
-    return len(str(os.stat(path).st_ino)) > 18
+    valid_streams = []
+
+    for stream in streams:
+        # Make sure to update stream's language to reflect disposition
+        stream.language = Language.rebuild(
+            stream.language, **stream.disposition.language_kwargs()
+        )
+
+        # 500 < 1200
+        if not stream.language.forced and stream.tags.frames < max_frames // 2:
+            logger.debug(
+                "Possible bad subtitle found: %s (%s frames - %s frames)",
+                stream,
+                stream.tags.frames,
+                max_frames,
+            )
+            continue
+
+        valid_streams.append(stream)
+
+    return valid_streams
+
+
+def _get_pretty_release_name(stream, container):
+    bname = os.path.basename(container.path)
+    return f"{os.path.splitext(bname)[0]}.{stream.suffix}"
+
+
+# TODO: improve this
+_SIGNS_LINE_RE = re.compile(r",([\w|_]{,15}(sign|fx|karaoke))", flags=re.IGNORECASE)
+
+
+def _clean_ass_subtitles(path, output_path):
+    """An attempt to ignore extraneous lines from ASS anime subtitles. Experimental."""
+
+    clean_lines = []
+
+    with open(path, "r") as f:
+        lines = f.readlines()
+        for line in lines:
+            if _SIGNS_LINE_RE.search(line) is None:
+                clean_lines.append(line)
+
+    logger.debug("Cleaned lines: %d", abs(len(lines) - len(clean_lines)))
+
+    with open(output_path, "w") as f:
+        f.writelines(clean_lines)
+        logger.debug("Lines written to output path: %s", output_path)
+
+
+_type_modifiers = {"ass": {_clean_ass_subtitles}}

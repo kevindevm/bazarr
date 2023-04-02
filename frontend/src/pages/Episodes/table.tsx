@@ -1,44 +1,39 @@
+import { useDownloadEpisodeSubtitles, useEpisodesProvider } from "@/apis/hooks";
+import { useShowOnlyDesired } from "@/apis/hooks/site";
+import { Action, GroupTable } from "@/components";
+import { AudioList } from "@/components/bazarr";
+import { EpisodeHistoryModal } from "@/components/modals";
+import { EpisodeSearchModal } from "@/components/modals/ManualSearchModal";
+import TextPopover from "@/components/TextPopover";
+import { useModals } from "@/modules/modals";
+import { useTableStyles } from "@/styles";
+import { BuildKey, filterSubtitleBy } from "@/utilities";
+import { useProfileItemsToLanguages } from "@/utilities/languages";
 import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
 import {
   faBookmark,
-  faBriefcase,
   faHistory,
   faUser,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useShowOnlyDesired } from "@redux/hooks";
-import { useDownloadEpisodeSubtitles } from "apis/hooks";
+import { Group, Text } from "@mantine/core";
 import {
-  ActionButton,
-  EpisodeHistoryModal,
-  GroupTable,
-  SubtitleToolModal,
-  TextPopover,
-  useShowModal,
-} from "components";
-import { ManualSearchModal } from "components/modals/ManualSearchModal";
-import React, { FunctionComponent, useCallback, useMemo } from "react";
-import { Badge, ButtonGroup } from "react-bootstrap";
-import { Column, TableUpdater } from "react-table";
-import { BuildKey, filterSubtitleBy } from "utilities";
-import { useProfileItemsToLanguages } from "utilities/languages";
-import { SubtitleAction } from "./components";
+  FunctionComponent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+} from "react";
+import { Column, TableInstance } from "react-table";
+import { Subtitle } from "./components";
 
 interface Props {
-  series?: Item.Series;
-  episodes: Item.Episode[];
+  episodes: Item.Episode[] | null;
   disabled?: boolean;
   profile?: Language.Profile;
 }
 
-const Table: FunctionComponent<Props> = ({
-  series,
-  episodes,
-  profile,
-  disabled,
-}) => {
-  const showModal = useShowModal();
-
+const Table: FunctionComponent<Props> = ({ episodes, profile, disabled }) => {
   const onlyDesired = useShowOnlyDesired();
 
   const profileItems = useProfileItemsToLanguages(profile);
@@ -52,6 +47,7 @@ const Table: FunctionComponent<Props> = ({
         forced,
         provider,
         subtitle,
+        original_format: originalFormat,
       } = result;
       const { sonarrSeriesId: seriesId, sonarrEpisodeId: episodeId } = item;
 
@@ -64,6 +60,8 @@ const Table: FunctionComponent<Props> = ({
           forced,
           provider,
           subtitle,
+          // eslint-disable-next-line camelcase
+          original_format: originalFormat,
         },
       });
     },
@@ -96,23 +94,20 @@ const Table: FunctionComponent<Props> = ({
       {
         Header: "Title",
         accessor: "title",
-        className: "text-nowrap",
-        Cell: ({ value, row }) => (
-          <TextPopover text={row.original.sceneName} delay={1}>
-            <span>{value}</span>
-          </TextPopover>
-        ),
+        Cell: ({ value, row }) => {
+          const { classes } = useTableStyles();
+
+          return (
+            <TextPopover text={row.original.sceneName}>
+              <Text className={classes.primary}>{value}</Text>
+            </TextPopover>
+          );
+        },
       },
       {
         Header: "Audio",
         accessor: "audio_language",
-        Cell: (row) => {
-          return row.value.map((v) => (
-            <Badge variant="secondary" key={v.code2}>
-              {v.name}
-            </Badge>
-          ));
-        },
+        Cell: ({ value }) => <AudioList audios={value}></AudioList>,
       },
       {
         Header: "Subtitles",
@@ -120,118 +115,121 @@ const Table: FunctionComponent<Props> = ({
         Cell: ({ row }) => {
           const episode = row.original;
 
-          const seriesid = episode.sonarrSeriesId;
+          const seriesId = episode.sonarrSeriesId;
 
           const elements = useMemo(() => {
-            const episodeid = episode.sonarrEpisodeId;
+            const episodeId = episode.sonarrEpisodeId;
 
             const missing = episode.missing_subtitles.map((val, idx) => (
-              <SubtitleAction
+              <Subtitle
                 missing
                 key={BuildKey(idx, val.code2, "missing")}
-                seriesId={seriesid}
-                episodeId={episodeid}
+                seriesId={seriesId}
+                episodeId={episodeId}
                 subtitle={val}
-              ></SubtitleAction>
+              ></Subtitle>
             ));
 
-            let raw_subtitles = episode.subtitles;
+            let rawSubtitles = episode.subtitles;
             if (onlyDesired) {
-              raw_subtitles = filterSubtitleBy(raw_subtitles, profileItems);
+              rawSubtitles = filterSubtitleBy(rawSubtitles, profileItems);
             }
 
-            const subtitles = raw_subtitles.map((val, idx) => (
-              <SubtitleAction
+            const subtitles = rawSubtitles.map((val, idx) => (
+              <Subtitle
                 key={BuildKey(idx, val.code2, "valid")}
-                seriesId={seriesid}
-                episodeId={episodeid}
+                seriesId={seriesId}
+                episodeId={episodeId}
                 subtitle={val}
-              ></SubtitleAction>
+              ></Subtitle>
             ));
 
             return [...missing, ...subtitles];
-          }, [episode, seriesid]);
+          }, [episode, seriesId]);
 
-          return elements;
+          return (
+            <Group spacing="xs" noWrap>
+              {elements}
+            </Group>
+          );
         },
       },
       {
         Header: "Actions",
         accessor: "sonarrEpisodeId",
-        Cell: ({ row, update }) => {
+        Cell: ({ row }) => {
+          const modals = useModals();
           return (
-            <ButtonGroup>
-              <ActionButton
+            <Group spacing="xs" noWrap>
+              <Action
+                label="Manual Search"
+                disabled={disabled}
+                color="dark"
+                onClick={() => {
+                  modals.openContextModal(EpisodeSearchModal, {
+                    item: row.original,
+                    download,
+                    query: useEpisodesProvider,
+                  });
+                }}
                 icon={faUser}
-                disabled={series?.profileId === null || disabled}
+              ></Action>
+              <Action
+                label="History"
+                disabled={disabled}
+                color="dark"
                 onClick={() => {
-                  update && update(row, "manual-search");
+                  modals.openContextModal(
+                    EpisodeHistoryModal,
+                    {
+                      episode: row.original,
+                    },
+                    {
+                      title: `History - ${row.original.title}`,
+                    }
+                  );
                 }}
-              ></ActionButton>
-              <ActionButton
                 icon={faHistory}
-                disabled={disabled}
-                onClick={() => {
-                  update && update(row, "history");
-                }}
-              ></ActionButton>
-              <ActionButton
-                icon={faBriefcase}
-                disabled={disabled}
-                onClick={() => {
-                  update && update(row, "tools");
-                }}
-              ></ActionButton>
-            </ButtonGroup>
+              ></Action>
+            </Group>
           );
         },
       },
     ],
-    [onlyDesired, profileItems, series, disabled]
-  );
-
-  const updateRow = useCallback<TableUpdater<Item.Episode>>(
-    (row, modalKey: string) => {
-      if (modalKey === "tools") {
-        showModal(modalKey, [row.original]);
-      } else {
-        showModal(modalKey, row.original);
-      }
-    },
-    [showModal]
+    [onlyDesired, profileItems, disabled, download]
   );
 
   const maxSeason = useMemo(
     () =>
-      episodes.reduce<number>((prev, curr) => Math.max(prev, curr.season), 0),
+      episodes?.reduce<number>(
+        (prev, curr) => Math.max(prev, curr.season),
+        0
+      ) ?? 0,
     [episodes]
   );
 
+  const instance = useRef<TableInstance<Item.Episode> | null>(null);
+
+  useEffect(() => {
+    if (instance.current) {
+      instance.current.toggleRowExpanded([`season:${maxSeason}`], true);
+    }
+  }, [maxSeason]);
+
   return (
-    <React.Fragment>
-      <GroupTable
-        columns={columns}
-        data={episodes}
-        update={updateRow}
-        initialState={{
-          sortBy: [
-            { id: "season", desc: true },
-            { id: "episode", desc: true },
-          ],
-          groupBy: ["season"],
-          expanded: {
-            [`season:${maxSeason}`]: true,
-          },
-        }}
-        emptyText="No Episode Found For This Series"
-      ></GroupTable>
-      <SubtitleToolModal modalKey="tools" size="lg"></SubtitleToolModal>
-      <EpisodeHistoryModal modalKey="history" size="lg"></EpisodeHistoryModal>
-      <ManualSearchModal
-        modalKey="manual-search"
-        download={download}
-      ></ManualSearchModal>
-    </React.Fragment>
+    <GroupTable
+      columns={columns}
+      data={episodes ?? []}
+      instanceRef={instance}
+      initialState={{
+        sortBy: [
+          { id: "season", desc: true },
+          { id: "episode", desc: true },
+        ],
+        groupBy: ["season"],
+      }}
+      tableStyles={{ emptyText: "No Episode Found For This Series" }}
+    ></GroupTable>
   );
 };
 

@@ -1,4 +1,21 @@
 import {
+  useEpisodesBySeriesId,
+  useIsAnyActionRunning,
+  useSeriesAction,
+  useSeriesById,
+  useSeriesModification,
+} from "@/apis/hooks";
+import { DropContent, Toolbox } from "@/components";
+import { QueryOverlay } from "@/components/async";
+import { ItemEditModal } from "@/components/forms/ItemEditForm";
+import { SeriesUploadModal } from "@/components/forms/SeriesUploadForm";
+import { SubtitleToolsModal } from "@/components/modals";
+import { useModals } from "@/modules/modals";
+import { notification, task, TaskGroup } from "@/modules/task";
+import ItemOverview from "@/pages/views/ItemOverview";
+import { RouterNames } from "@/Router/RouterNames";
+import { useLanguageProfileBy } from "@/utilities/languages";
+import {
   faAdjust,
   faBriefcase,
   faCloudUploadAlt,
@@ -7,42 +24,23 @@ import {
   faSync,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
-import { dispatchTask } from "@modules/task";
-import { createTask } from "@modules/task/utilities";
-import {
-  useEpisodesBySeriesId,
-  useIsAnyActionRunning,
-  useSeriesAction,
-  useSeriesById,
-  useSeriesModification,
-} from "apis/hooks";
-import {
-  ContentHeader,
-  ItemEditorModal,
-  LoadingIndicator,
-  SeriesUploadModal,
-  useShowModal,
-} from "components";
-import ItemOverview from "components/ItemOverview";
-import { RouterEmptyPath } from "pages/404";
-import React, { FunctionComponent, useMemo } from "react";
-import { Alert, Container, Row } from "react-bootstrap";
-import { Helmet } from "react-helmet";
-import { Redirect, RouteComponentProps, withRouter } from "react-router-dom";
-import { useLanguageProfileBy } from "utilities/languages";
+import { Container, Group, Stack } from "@mantine/core";
+import { Dropzone } from "@mantine/dropzone";
+import { useDocumentTitle } from "@mantine/hooks";
+import { showNotification } from "@mantine/notifications";
+import { FunctionComponent, useCallback, useMemo, useRef } from "react";
+import { Navigate, useParams } from "react-router-dom";
 import Table from "./table";
 
-interface Params {
-  id: string;
-}
+const SeriesEpisodesView: FunctionComponent = () => {
+  const params = useParams();
+  const id = Number.parseInt(params.id as string);
 
-interface Props extends RouteComponentProps<Params> {}
+  const seriesQuery = useSeriesById(id);
+  const episodesQuery = useEpisodesBySeriesId(id);
 
-const SeriesEpisodesView: FunctionComponent<Props> = (props) => {
-  const { match } = props;
-  const id = Number.parseInt(match.params.id);
-  const { data: series, isFetched } = useSeriesById(id);
-  const { data: episodes } = useEpisodesBySeriesId(id);
+  const { data: episodes } = episodesQuery;
+  const { data: series, isFetched } = seriesQuery;
 
   const mutation = useSeriesModification();
   const { mutateAsync: action } = useSeriesAction();
@@ -63,118 +61,149 @@ const SeriesEpisodesView: FunctionComponent<Props> = (props) => {
     [series]
   );
 
-  const showModal = useShowModal();
+  const modals = useModals();
 
   const profile = useLanguageProfileBy(series?.profileId);
 
   const hasTask = useIsAnyActionRunning();
 
-  if (isNaN(id) || (isFetched && !series)) {
-    return <Redirect to={RouterEmptyPath}></Redirect>;
-  }
+  const onDrop = useCallback(
+    (files: File[]) => {
+      if (series && profile) {
+        modals.openContextModal(SeriesUploadModal, {
+          files,
+          series,
+        });
+      } else {
+        showNotification(
+          notification.warn(
+            "Cannot Upload Files",
+            "series or language profile is not ready"
+          )
+        );
+      }
+    },
+    [modals, profile, series]
+  );
 
-  if (!series) {
-    return <LoadingIndicator></LoadingIndicator>;
+  useDocumentTitle(`${series?.title ?? "Unknown Series"} - Bazarr (Series)`);
+
+  const openDropzone = useRef<VoidFunction>(null);
+
+  if (isNaN(id) || (isFetched && !series)) {
+    return <Navigate to={RouterNames.NotFound}></Navigate>;
   }
 
   return (
-    <Container fluid>
-      <Helmet>
-        <title>{series.title} - Bazarr (Series)</title>
-      </Helmet>
-      <ContentHeader>
-        <ContentHeader.Group pos="start">
-          <ContentHeader.Button
-            icon={faSync}
-            disabled={!available || hasTask}
-            onClick={() => {
-              const task = createTask(series.title, id, action, {
-                action: "scan-disk",
-                seriesid: id,
-              });
-              dispatchTask("Scanning disk...", [task], "Scanning...");
-            }}
-          >
-            Scan Disk
-          </ContentHeader.Button>
-          <ContentHeader.Button
-            icon={faSearch}
-            onClick={() => {
-              const task = createTask(series.title, id, action, {
-                action: "search-missing",
-                seriesid: id,
-              });
-              dispatchTask("Searching subtitles...", [task], "Searching...");
-            }}
-            disabled={
-              series.episodeFileCount === 0 ||
-              series.profileId === null ||
-              !available
-            }
-          >
-            Search
-          </ContentHeader.Button>
-        </ContentHeader.Group>
-        <ContentHeader.Group pos="end">
-          <ContentHeader.Button
-            disabled={series.episodeFileCount === 0 || !available || hasTask}
-            icon={faBriefcase}
-            onClick={() => showModal("tools", episodes)}
-          >
-            Tools
-          </ContentHeader.Button>
-          <ContentHeader.Button
-            disabled={
-              series.episodeFileCount === 0 ||
-              series.profileId === null ||
-              !available
-            }
-            icon={faCloudUploadAlt}
-            onClick={() => showModal("upload", series)}
-          >
-            Upload
-          </ContentHeader.Button>
-          <ContentHeader.Button
-            icon={faWrench}
-            disabled={hasTask}
-            onClick={() => showModal("edit", series)}
-          >
-            Edit Series
-          </ContentHeader.Button>
-        </ContentHeader.Group>
-      </ContentHeader>
-      <Row>
-        <Alert
-          className="w-100 m-0 py-2"
-          show={hasTask}
-          style={{ borderRadius: 0 }}
-          variant="light"
+    <Container px={0} fluid>
+      <QueryOverlay result={seriesQuery}>
+        <Dropzone.FullScreen
+          openRef={openDropzone}
+          active={profile !== undefined}
+          onDrop={onDrop}
         >
-          A background task is running for this show, actions are unavailable
-        </Alert>
-      </Row>
-      <Row>
-        <ItemOverview item={series} details={details}></ItemOverview>
-      </Row>
-      <Row>
-        {episodes === undefined ? (
-          <LoadingIndicator></LoadingIndicator>
-        ) : (
-          <Table
-            series={series}
-            episodes={episodes}
-            profile={profile}
-            disabled={hasTask}
-          ></Table>
-        )}
-      </Row>
-      <ItemEditorModal modalKey="edit" mutation={mutation}></ItemEditorModal>
-      <SeriesUploadModal
-        modalKey="upload"
-        episodes={episodes ?? []}
-      ></SeriesUploadModal>
+          <DropContent></DropContent>
+        </Dropzone.FullScreen>
+        <Toolbox>
+          <Group spacing="xs">
+            <Toolbox.Button
+              icon={faSync}
+              disabled={!available || hasTask}
+              onClick={() => {
+                if (series) {
+                  task.create(series.title, TaskGroup.ScanDisk, action, {
+                    action: "scan-disk",
+                    seriesid: id,
+                  });
+                }
+              }}
+            >
+              Scan Disk
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faSearch}
+              onClick={() => {
+                if (series) {
+                  task.create(series.title, TaskGroup.SearchSubtitle, action, {
+                    action: "search-missing",
+                    seriesid: id,
+                  });
+                }
+              }}
+              disabled={
+                series === undefined ||
+                series.episodeFileCount === 0 ||
+                series.profileId === null ||
+                !available
+              }
+            >
+              Search
+            </Toolbox.Button>
+          </Group>
+          <Group spacing="xs">
+            <Toolbox.Button
+              disabled={
+                series === undefined ||
+                series.episodeFileCount === 0 ||
+                !available ||
+                hasTask
+              }
+              icon={faBriefcase}
+              onClick={() => {
+                if (episodes) {
+                  modals.openContextModal(SubtitleToolsModal, {
+                    payload: episodes,
+                  });
+                }
+              }}
+            >
+              Mass Edit
+            </Toolbox.Button>
+            <Toolbox.Button
+              disabled={
+                series === undefined ||
+                series.episodeFileCount === 0 ||
+                series.profileId === null ||
+                !available
+              }
+              icon={faCloudUploadAlt}
+              onClick={() => openDropzone.current?.()}
+            >
+              Upload
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faWrench}
+              disabled={hasTask}
+              onClick={() => {
+                if (series) {
+                  modals.openContextModal(
+                    ItemEditModal,
+                    {
+                      item: series,
+                      mutation,
+                    },
+                    { title: series.title }
+                  );
+                }
+              }}
+            >
+              Edit Series
+            </Toolbox.Button>
+          </Group>
+        </Toolbox>
+        <Stack>
+          <ItemOverview item={series ?? null} details={details}></ItemOverview>
+          <QueryOverlay result={episodesQuery}>
+            <Table
+              episodes={episodes ?? null}
+              profile={profile}
+              disabled={hasTask || !series || series.profileId === null}
+            ></Table>
+          </QueryOverlay>
+        </Stack>
+      </QueryOverlay>
     </Container>
   );
 };
 
-export default withRouter(SeriesEpisodesView);
+export default SeriesEpisodesView;

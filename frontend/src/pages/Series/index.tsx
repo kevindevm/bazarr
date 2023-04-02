@@ -1,126 +1,129 @@
-import { faWrench } from "@fortawesome/free-solid-svg-icons";
-import {
-  useLanguageProfiles,
-  useSeries,
-  useSeriesModification,
-  useSeriesPagination,
-} from "apis/hooks";
-import { ActionBadge } from "components";
-import ItemView from "components/views/ItemView";
-import React, { FunctionComponent, useMemo } from "react";
-import { Badge, ProgressBar } from "react-bootstrap";
+import { useSeriesModification, useSeriesPagination } from "@/apis/hooks";
+import { Action } from "@/components";
+import { AudioList } from "@/components/bazarr";
+import LanguageProfileName from "@/components/bazarr/LanguageProfile";
+import { ItemEditModal } from "@/components/forms/ItemEditForm";
+import { useModals } from "@/modules/modals";
+import ItemView from "@/pages/views/ItemView";
+import { useTableStyles } from "@/styles";
+import { faBookmark as farBookmark } from "@fortawesome/free-regular-svg-icons";
+import { faBookmark, faWrench } from "@fortawesome/free-solid-svg-icons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { Anchor, Container, Progress } from "@mantine/core";
+import { useDocumentTitle } from "@mantine/hooks";
+import { FunctionComponent, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { Column } from "react-table";
-import { BuildKey } from "utilities";
 
-interface Props {}
-
-const SeriesView: FunctionComponent<Props> = () => {
-  const { data: profiles } = useLanguageProfiles();
+const SeriesView: FunctionComponent = () => {
   const mutation = useSeriesModification();
 
   const query = useSeriesPagination();
-  const full = useSeries();
 
   const columns: Column<Item.Series>[] = useMemo<Column<Item.Series>[]>(
     () => [
       {
+        accessor: "monitored",
+        Cell: ({ value }) => (
+          <FontAwesomeIcon
+            title={value ? "monitored" : "unmonitored"}
+            icon={value ? faBookmark : farBookmark}
+          ></FontAwesomeIcon>
+        ),
+      },
+      {
         Header: "Name",
         accessor: "title",
-        className: "text-nowrap",
-        Cell: ({ row, value, isSelecting: select }) => {
-          if (select) {
-            return value;
-          } else {
-            const target = `/series/${row.original.sonarrSeriesId}`;
-            return (
-              <Link to={target}>
-                <span>{value}</span>
-              </Link>
-            );
-          }
+        Cell: ({ row, value }) => {
+          const { classes } = useTableStyles();
+          const target = `/series/${row.original.sonarrSeriesId}`;
+          return (
+            <Anchor className={classes.primary} component={Link} to={target}>
+              {value}
+            </Anchor>
+          );
         },
       },
       {
         Header: "Audio",
         accessor: "audio_language",
-        Cell: (row) => {
-          return row.value.map((v) => (
-            <Badge
-              variant="secondary"
-              className="mr-2"
-              key={BuildKey(v.code2, v.forced, v.hi)}
-            >
-              {v.name}
-            </Badge>
-          ));
+        Cell: ({ value }) => {
+          return <AudioList audios={value}></AudioList>;
         },
       },
       {
         Header: "Languages Profile",
         accessor: "profileId",
         Cell: ({ value }) => {
-          return profiles?.find((v) => v.profileId === value)?.name ?? null;
+          return (
+            <LanguageProfileName index={value} empty=""></LanguageProfileName>
+          );
         },
       },
       {
         Header: "Episodes",
         accessor: "episodeFileCount",
-        selectHide: true,
-        Cell: ({ row }) => {
+        Cell: (row) => {
           const { episodeFileCount, episodeMissingCount, profileId, title } =
-            row.original;
-
+            row.row.original;
           let progress = 0;
           let label = "";
           if (episodeFileCount === 0 || !profileId) {
             progress = 0.0;
           } else {
-            progress = episodeFileCount - episodeMissingCount;
+            progress = (1.0 - episodeMissingCount / episodeFileCount) * 100.0;
             label = `${
               episodeFileCount - episodeMissingCount
             }/${episodeFileCount}`;
           }
 
-          const color = episodeMissingCount === 0 ? "primary" : "warning";
-
           return (
-            <ProgressBar
-              className="my-a"
+            <Progress
               key={title}
-              variant={color}
-              min={0}
-              max={episodeFileCount}
-              now={progress}
+              size="xl"
+              color={episodeMissingCount === 0 ? "brand" : "yellow"}
+              value={progress}
               label={label}
-            ></ProgressBar>
+            ></Progress>
           );
         },
       },
       {
         accessor: "sonarrSeriesId",
-        selectHide: true,
-        Cell: ({ row, update }) => (
-          <ActionBadge
-            icon={faWrench}
-            onClick={() => {
-              update && update(row, "edit");
-            }}
-          ></ActionBadge>
-        ),
+        Cell: ({ row: { original } }) => {
+          const modals = useModals();
+          return (
+            <Action
+              label="Edit Series"
+              tooltip={{ position: "left" }}
+              variant="light"
+              onClick={() =>
+                modals.openContextModal(
+                  ItemEditModal,
+                  {
+                    mutation,
+                    item: original,
+                  },
+                  {
+                    title: original.title,
+                  }
+                )
+              }
+              icon={faWrench}
+            ></Action>
+          );
+        },
       },
     ],
-    [profiles]
+    [mutation]
   );
 
+  useDocumentTitle("Series - Bazarr");
+
   return (
-    <ItemView
-      name="Series"
-      fullQuery={full}
-      query={query}
-      columns={columns}
-      mutation={mutation}
-    ></ItemView>
+    <Container px={0} fluid>
+      <ItemView query={query} columns={columns}></ItemView>
+    </Container>
   );
 };
 

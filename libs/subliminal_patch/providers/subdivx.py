@@ -1,27 +1,23 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
-import io
+
 import logging
-import os
 import re
 import time
-import zipfile
 
-import rarfile
-from subzero.language import Language
 from requests import Session
-
-from subliminal import __short_version__
-from subliminal.exceptions import ServiceUnavailable
-from subliminal.providers import ParserBeautifulSoup
-from subliminal.subtitle import SUBTITLE_EXTENSIONS, fix_line_ending, guess_matches
-from subliminal.video import Episode, Movie
-from subliminal_patch.exceptions import APIThrottled
 from six.moves import range
-from subliminal_patch.score import get_scores
-from subliminal_patch.subtitle import Subtitle
+from subliminal import __short_version__
+from subliminal.providers import ParserBeautifulSoup
+from subliminal.video import Episode
+from subliminal.video import Movie
+from subliminal_patch.exceptions import APIThrottled
 from subliminal_patch.providers import Provider
-from guessit import guessit
+from subliminal_patch.providers.utils import get_archive_from_bytes
+from subliminal_patch.providers.utils import get_subtitle_from_archive
+from subliminal_patch.providers.utils import update_matches
+from subliminal_patch.subtitle import Subtitle
+from subzero.language import Language
 
 _SERVER_URL = "https://www.subdivx.com"
 
@@ -31,7 +27,22 @@ _CLEAN_TITLE_RES = [
     (r" {2,}", " "),
 ]
 
+_SPANISH_RE = re.compile(r"españa|ib[eé]rico|castellano|gallego|castilla")
 _YEAR_RE = re.compile(r"(\(\d{4}\))")
+
+
+_SERIES_RE = re.compile(
+    r"\(?\d{4}\)?|(s\d{1,2}(e\d{1,2})?|(season|temporada)\s\d{1,2}).*?$",
+    flags=re.IGNORECASE,
+)
+_EPISODE_NUM_RE = re.compile(r"[eE](?P<x>\d{1,2})")
+_SEASON_NUM_RE = re.compile(
+    r"(s|(season|temporada)\s)(?P<x>\d{1,2})", flags=re.IGNORECASE
+)
+_EPISODE_YEAR_RE = re.compile(r"\((?P<x>(19\d{2}|20[0-2]\d))\)")
+_UNSUPPORTED_RE = re.compile(
+    r"(\)?\d{4}\)?|[sS]\d{1,2})\s.{,3}(extras|forzado(s)?|forced)", flags=re.IGNORECASE
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +58,17 @@ class SubdivxSubtitle(Subtitle):
             language, hearing_impaired=False, page_link=page_link
         )
         self.video = video
-        self.title = title
+
         self.download_url = download_url
-        self.description = description
         self.uploader = uploader
-        self.release_info = self.title
-        if self.description and self.description.strip():
-            self.release_info += " | " + self.description
+
+        self._title = str(title).strip()
+        self._description = str(description).strip()
+
+        self.release_info = self._title
+
+        if self._description:
+            self.release_info += " | " + self._description
 
     @property
     def id(self):
@@ -64,26 +79,18 @@ class SubdivxSubtitle(Subtitle):
 
         # episode
         if isinstance(video, Episode):
-            # already matched in search query
+            # already matched within provider
             matches.update(["title", "series", "season", "episode", "year"])
 
         # movie
         elif isinstance(video, Movie):
-            # already matched in search query
+            # already matched within provider
             matches.update(["title", "year"])
 
-        # Special string comparisons are unnecessary. Guessit can match keys
-        # from any string and find even more keywords.
-        matches |= guess_matches(
-            video,
-            guessit(
-                self.description,
-                {"type": "episode" if isinstance(video, Episode) else "movie"},
-            ),
-        )
+        update_matches(matches, video, self._description)
 
         # Don't lowercase; otherwise it will match a lot of false positives
-        if video.release_group and video.release_group in self.description:
+        if video.release_group and video.release_group in self._description:
             matches.add("release_group")
 
         return matches
@@ -100,7 +107,6 @@ class SubdivxSubtitlesProvider(Provider):
     subtitle_class = SubdivxSubtitle
 
     multi_result_throttle = 2
-    language_list = list(languages)
 
     def __init__(self):
         self.session = None
@@ -114,54 +120,85 @@ class SubdivxSubtitlesProvider(Provider):
         self.session.close()
 
     def query(self, video, languages):
-        if isinstance(video, Episode):
-            query = f"{video.series} S{video.season:02}E{video.episode:02}"
-        else:
-            # Subdvix has problems searching foreign movies if the year is
-            # appended. A proper solution would be filtering results with the
-            # year in self._parse_subtitles_page.
-            query = video.title
+        subtitles = []
 
+        if isinstance(video, Episode):
+            # TODO: cache pack queries (TV SHOW S01).
+            # Too many redundant server calls.
+
+            for query in (
+                f"{video.series} S{video.season:02}E{video.episode:02}",
+                f"{video.series} S{video.season:02}",
+            ):
+                subtitles += self._handle_multi_page_search(query, video)
+
+            # Try only with series title
+            if len(subtitles) <= 5:
+                subtitles += self._handle_multi_page_search(video.series, video, 1)
+
+        else:
+            for query in (video.title, f"{video.title} ({video.year})"):
+                subtitles += self._handle_multi_page_search(query, video)
+                # Second query is a fallback
+                if subtitles:
+                    break
+
+        return subtitles
+
+    def _handle_multi_page_search(self, query, video, max_loops=2):
         params = {
             "buscar2": query,
             "accion": "5",
             "masdesc": "",
             "subtitulos": "1",
             "realiza_b": "1",
-            "pg": "1",
+            "pg": 1,
         }
+        logger.debug("Query: %s", query)
 
-        logger.debug(f"Searching subtitles: {query}")
-        subtitles = []
-        language = self.language_list[0]
-        search_link = f"{_SERVER_URL}/index.php"
-        while True:
-            response = self.session.get(
-                search_link, params=params, allow_redirects=True, timeout=20
-            )
+        loops = 1
+        max_loops_not_met = True
 
-            try:
-                page_subtitles = self._parse_subtitles_page(video, response, language)
-            except Exception as e:
-                logger.error(f"Error parsing subtitles list: {e}")
+        while max_loops_not_met:
+            max_loops_not_met = loops < max_loops
+
+            page_subtitles, last_page = self._get_page_subtitles(params, video)
+
+            logger.debug("Yielding %d subtitles [loop #%d]", len(page_subtitles), loops)
+            yield from page_subtitles
+
+            if last_page:
+                logger.debug("Last page for '%s' query. Breaking loop", query)
                 break
 
-            subtitles += page_subtitles
-
-            if len(page_subtitles) < 100:
-                break  # this is the last page
+            loops += 1
 
             params["pg"] += 1  # search next page
             time.sleep(self.multi_result_throttle)
 
-        return subtitles
+        if not max_loops_not_met:
+            logger.debug("Max loops limit exceeded (%d)", max_loops)
+
+    def _get_page_subtitles(self, params, video):
+        search_link = f"{_SERVER_URL}/index.php"
+        response = self.session.get(
+            search_link, params=params, allow_redirects=True, timeout=20
+        )
+
+        try:
+            page_subtitles, last_page = self._parse_subtitles_page(video, response)
+        except Exception as error:
+            logger.error(f"Error parsing subtitles list: {error}")
+            return []
+
+        return page_subtitles, last_page
 
     def list_subtitles(self, video, languages):
         return self.query(video, languages)
 
     def download_subtitle(self, subtitle):
         # download the subtitle
-        logger.info("Downloading subtitle %r", subtitle)
+        logger.debug("Downloading subtitle %r", subtitle)
 
         # download zip / rar file with the subtitle
         response = self.session.get(
@@ -171,14 +208,19 @@ class SubdivxSubtitlesProvider(Provider):
         )
         response.raise_for_status()
 
-        # open the compressed archive
-        archive = _get_archive(response.content)
+        # TODO: add MustGetBlacklisted support
 
-        # extract the subtitle
-        subtitle_content = _get_subtitle_from_archive(archive, subtitle)
-        subtitle.content = fix_line_ending(subtitle_content)
+        archive = get_archive_from_bytes(response.content)
+        if archive is None:
+            raise APIThrottled("Unknwon compressed format")
 
-    def _parse_subtitles_page(self, video, response, language):
+        episode = None
+        if isinstance(subtitle.video, Episode):
+            episode = subtitle.video.episode
+
+        subtitle.content = get_subtitle_from_archive(archive, episode=episode)
+
+    def _parse_subtitles_page(self, video, response):
         subtitles = []
 
         page_soup = ParserBeautifulSoup(
@@ -186,20 +228,19 @@ class SubdivxSubtitlesProvider(Provider):
         )
         title_soups = page_soup.find_all("div", {"id": "menu_detalle_buscador"})
         body_soups = page_soup.find_all("div", {"id": "buscador_detalle"})
-        episode = isinstance(video, Episode)
+
+        title_checker = _check_episode if isinstance(video, Episode) else _check_movie
 
         for subtitle in range(0, len(title_soups)):
             title_soup, body_soup = title_soups[subtitle], body_soups[subtitle]
             # title
             title = _clean_title(title_soup.find("a").text)
 
-            # Forced subtitles are not supported
-            if title.lower().rstrip().endswith(("forzado", "forzados")):
-                logger.debug("Skipping forced subtitles: %s", title)
+            if _UNSUPPORTED_RE.search(title):
+                logger.debug("Skipping unsupported subtitles: %s", title)
                 continue
 
-            # Check movie title (if the video is a movie)
-            if not episode and not _check_movie(video, title):
+            if not title_checker(video, title):
                 continue
 
             # Data
@@ -208,12 +249,16 @@ class SubdivxSubtitlesProvider(Provider):
             if not any(item in datos for item in ("Cds:</b> 1", "SubRip")):
                 continue
 
-            spain = "/pais/7.gif" in datos
-            language = Language.fromalpha2("es") if spain else Language("spa", "MX")
-
             # description
             sub_details = body_soup.find("div", {"id": "buscador_detalle_sub"}).text
             description = sub_details.replace(",", " ")
+
+            # language
+            spain = (
+                "/pais/7.gif" in datos
+                or _SPANISH_RE.search(description.lower()) is not None
+            )
+            language = Language.fromalpha2("es") if spain else Language("spa", "MX")
 
             # uploader
             uploader = body_soup.find("a", {"class": "link1"}).text
@@ -227,7 +272,7 @@ class SubdivxSubtitlesProvider(Provider):
             logger.debug("Found subtitle %r", subtitle)
             subtitles.append(subtitle)
 
-        return subtitles
+        return subtitles, len(title_soups) < 100
 
 
 def _clean_title(title):
@@ -241,79 +286,6 @@ def _clean_title(title):
     return title
 
 
-def _get_archive(content):
-    # open the archive
-    archive_stream = io.BytesIO(content)
-    if rarfile.is_rarfile(archive_stream):
-        logger.debug("Identified rar archive")
-        archive = rarfile.RarFile(archive_stream)
-    elif zipfile.is_zipfile(archive_stream):
-        logger.debug("Identified zip archive")
-        archive = zipfile.ZipFile(archive_stream)
-    else:
-        raise APIThrottled("Unsupported compressed format")
-
-    return archive
-
-
-def _get_subtitle_from_archive(archive, subtitle):
-    _valid_names = []
-    for name in archive.namelist():
-        # discard hidden files
-        # discard non-subtitle files
-        if not os.path.split(name)[-1].startswith(".") and name.lower().endswith(
-            SUBTITLE_EXTENSIONS
-        ):
-            _valid_names.append(name)
-
-    # archive with only 1 subtitle
-    if len(_valid_names) == 1:
-        logger.debug(
-            f"returning from archive: {_valid_names[0]} (single subtitle file)"
-        )
-        return archive.read(_valid_names[0])
-
-    # in archives with more than 1 subtitle (season pack) we try to guess the best subtitle file
-    _scores = get_scores(subtitle.video)
-    _max_score = 0
-    _max_name = ""
-    for name in _valid_names:
-        _guess = guessit(name)
-        if "season" not in _guess:
-            _guess["season"] = -1
-        if "episode" not in _guess:
-            _guess["episode"] = -1
-
-        if isinstance(subtitle.video, Episode):
-            logger.debug("guessing %s" % name)
-            logger.debug(
-                f"subtitle S{_guess['season']}E{_guess['episode']} video "
-                f"S{subtitle.video.season}E{subtitle.video.episode}"
-            )
-
-            if (
-                subtitle.video.episode != _guess["episode"]
-                or subtitle.video.season != _guess["season"]
-            ):
-                logger.debug("subtitle does not match video, skipping")
-                continue
-
-        matches = set()
-        matches |= guess_matches(subtitle.video, _guess)
-        _score = sum((_scores.get(match, 0) for match in matches))
-        logger.debug("srt matches: %s, score %d" % (matches, _score))
-        if _score > _max_score:
-            _max_score = _score
-            _max_name = name
-            logger.debug(f"new max: {name} {_score}")
-
-    if _max_score > 0:
-        logger.debug(f"returning from archive: {_max_name} scored {_max_score}")
-        return archive.read(_max_name)
-
-    raise APIThrottled("Can not find the subtitle in the compressed file")
-
-
 def _get_download_url(data):
     try:
         return [
@@ -323,6 +295,49 @@ def _get_download_url(data):
         ][0]
     except IndexError:
         return None
+
+
+def _check_episode(video, title):
+    ep_num = _EPISODE_NUM_RE.search(title)
+    season_num = _SEASON_NUM_RE.search(title)
+    year = _EPISODE_YEAR_RE.search(title)
+
+    # Only check if both video and Subdivx's title have year metadata
+    if year is not None and video.year:
+        year = int(year.group("x"))
+        # Tolerancy of 1 year difference
+        if abs(year - (video.year or 0)) > 1:
+            logger.debug("Series year doesn't match: %s", title)
+            return False
+
+    if season_num is None:
+        logger.debug("Not a season/episode: %s", title)
+        return False
+
+    season_num = int(season_num.group("x"))
+
+    if ep_num is not None:
+        ep_num = int(ep_num.group("x"))
+
+    ep_matches = (
+        (video.episode == ep_num) or (ep_num is None)
+    ) and season_num == video.season
+
+    series_title = _SERIES_RE.sub("", title).strip()
+
+    distance = abs(len(series_title) - len(video.series))
+
+    series_matched = distance < 4 and ep_matches
+
+    logger.debug(
+        "Series matched? %s [%s -> %s] [title distance: %d]",
+        series_matched,
+        video,
+        title,
+        distance,
+    )
+
+    return series_matched
 
 
 def _check_movie(video, title):

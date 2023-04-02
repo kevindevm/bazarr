@@ -1,82 +1,37 @@
-import React, {
-  Dispatch,
-  FunctionComponent,
-  useContext,
-  useMemo,
-  useState,
-} from "react";
-import { Collapse } from "react-bootstrap";
-
-type SupportType = string | boolean;
-
-const CollapseContext = React.createContext<
-  [SupportType, Dispatch<SupportType>]
->(["", (s) => {}]);
-const CollapseUpdateContext = React.createContext<Dispatch<SupportType>>(
-  (s) => {}
-);
-
-export function useCollapse() {
-  return useContext(CollapseUpdateContext);
-}
-
-interface CollapseBoxType {
-  Control: typeof CollapseBoxControl;
-  Content: typeof CollapseBoxContent;
-}
-
-const CollapseBox: CollapseBoxType & FunctionComponent = ({ children }) => {
-  const state = useState<boolean | string>(false);
-
-  return (
-    <CollapseContext.Provider value={state}>
-      {children}
-    </CollapseContext.Provider>
-  );
-};
-
-const CollapseBoxControl: FunctionComponent = ({ children }) => {
-  const context = useContext(CollapseContext);
-  return (
-    <CollapseUpdateContext.Provider value={context[1]}>
-      {children}
-    </CollapseUpdateContext.Provider>
-  );
-};
+import { Collapse, Stack } from "@mantine/core";
+import { FunctionComponent, useMemo, useRef } from "react";
+import { useSettingValue } from "../utilities/hooks";
 
 interface ContentProps {
-  on?: (k: string) => boolean;
-  eventKey?: string;
+  settingKey: string;
+  on?: (k: unknown) => boolean;
   indent?: boolean;
-  children: JSX.Element | JSX.Element[];
 }
 
-const CollapseBoxContent: FunctionComponent<ContentProps> = ({
+const CollapseBox: FunctionComponent<ContentProps> = ({
   on,
-  eventKey,
   indent,
   children,
+  settingKey,
 }) => {
-  const [value] = useContext(CollapseContext);
+  const value = useSettingValue(settingKey);
 
-  const open = useMemo(() => {
-    if (on && typeof value === "string") {
-      return on(value);
-    } else if (eventKey) {
-      return value === eventKey;
+  const onRef = useRef(on);
+  onRef.current = on;
+
+  const open = useMemo<boolean>(() => {
+    if (onRef.current) {
+      return onRef.current(value);
     } else {
-      return value === true;
+      return Boolean(value);
     }
-  }, [on, value, eventKey]);
+  }, [value]);
 
   return (
-    <Collapse in={open} className={indent === false ? undefined : "pl-4"}>
-      <div>{children}</div>
+    <Collapse in={open} pl={indent ? "md" : undefined}>
+      <Stack spacing="xs">{children}</Stack>
     </Collapse>
   );
 };
-
-CollapseBox.Control = CollapseBoxControl;
-CollapseBox.Content = CollapseBoxContent;
 
 export default CollapseBox;

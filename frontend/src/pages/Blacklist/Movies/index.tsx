@@ -1,39 +1,40 @@
+import {
+  useMovieBlacklist,
+  useMovieDeleteBlacklist,
+} from "@/apis/hooks/movies";
+import { Toolbox } from "@/components";
+import { QueryOverlay } from "@/components/async";
 import { faTrash } from "@fortawesome/free-solid-svg-icons";
-import { useMovieBlacklist, useMovieDeleteBlacklist } from "apis/hooks/movies";
-import { ContentHeader, QueryOverlay } from "components";
-import React, { FunctionComponent } from "react";
-import { Container, Row } from "react-bootstrap";
-import { Helmet } from "react-helmet";
+import { Container, Stack } from "@mantine/core";
+import { useDocumentTitle } from "@mantine/hooks";
+import { FunctionComponent } from "react";
 import Table from "./table";
 
-interface Props {}
-
-const BlacklistMoviesView: FunctionComponent<Props> = () => {
+const BlacklistMoviesView: FunctionComponent = () => {
   const blacklist = useMovieBlacklist();
   const { data } = blacklist;
 
   const { mutateAsync } = useMovieDeleteBlacklist();
 
+  useDocumentTitle("Movies Blacklist - Bazarr");
+
   return (
-    <QueryOverlay result={blacklist}>
-      <Container fluid>
-        <Helmet>
-          <title>Movies Blacklist - Bazarr</title>
-        </Helmet>
-        <ContentHeader>
-          <ContentHeader.AsyncButton
-            icon={faTrash}
-            disabled={data?.length === 0}
-            promise={() => mutateAsync({ all: true })}
-          >
-            Remove All
-          </ContentHeader.AsyncButton>
-        </ContentHeader>
-        <Row>
+    <Container fluid px={0}>
+      <QueryOverlay result={blacklist}>
+        <Stack>
+          <Toolbox>
+            <Toolbox.MutateButton
+              icon={faTrash}
+              disabled={data?.length === 0}
+              promise={() => mutateAsync({ all: true })}
+            >
+              Remove All
+            </Toolbox.MutateButton>
+          </Toolbox>
           <Table blacklist={data ?? []}></Table>
-        </Row>
-      </Container>
-    </QueryOverlay>
+        </Stack>
+      </QueryOverlay>
+    </Container>
   );
 };
 

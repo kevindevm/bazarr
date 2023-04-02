@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2021 Chris Caron <lead2gold@gmail.com>
+# Copyright (C) 2022 Chris Caron <lead2gold@gmail.com>
 # All rights reserved.
 #
 # This code is licensed under the MIT License.
@@ -24,10 +24,10 @@
 # THE SOFTWARE.
 
 __title__ = 'Apprise'
-__version__ = '0.9.6'
+__version__ = '1.1.0'
 __author__ = 'Chris Caron'
 __license__ = 'MIT'
-__copywrite__ = 'Copyright (C) 2021 Chris Caron <lead2gold@gmail.com>'
+__copywrite__ = 'Copyright (C) 2022 Chris Caron <lead2gold@gmail.com>'
 __email__ = 'lead2gold@gmail.com'
 __status__ = 'Production'
 
@@ -57,6 +57,8 @@ from .AppriseAsset import AppriseAsset
 from .AppriseConfig import AppriseConfig
 from .AppriseAttachment import AppriseAttachment
 
+from . import decorators
+
 # Inherit our logging with our additional entries added to it
 from .logger import logging
 from .logger import logger
@@ -77,6 +79,9 @@ __all__ = [
     'ContentIncludeMode', 'CONTENT_INCLUDE_MODES',
     'ContentLocation', 'CONTENT_LOCATIONS',
     'PrivacyMode',
+
+    # Decorator
+    'decorators',
 
     # Logging
     'logging', 'logger', 'LogCapture',

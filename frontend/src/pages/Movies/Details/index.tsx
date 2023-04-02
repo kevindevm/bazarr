@@ -1,5 +1,27 @@
 import {
+  useDownloadMovieSubtitles,
+  useIsMovieActionRunning,
+  useMoviesProvider,
+} from "@/apis/hooks";
+import {
+  useMovieAction,
+  useMovieById,
+  useMovieModification,
+} from "@/apis/hooks/movies";
+import { Action, DropContent, Toolbox } from "@/components";
+import { QueryOverlay } from "@/components/async";
+import { ItemEditModal } from "@/components/forms/ItemEditForm";
+import { MovieUploadModal } from "@/components/forms/MovieUploadForm";
+import { MovieHistoryModal, SubtitleToolsModal } from "@/components/modals";
+import { MovieSearchModal } from "@/components/modals/ManualSearchModal";
+import { useModals } from "@/modules/modals";
+import { notification, task, TaskGroup } from "@/modules/task";
+import ItemOverview from "@/pages/views/ItemOverview";
+import { RouterNames } from "@/Router/RouterNames";
+import { useLanguageProfileBy } from "@/utilities/languages";
+import {
   faCloudUploadAlt,
+  faEllipsis,
   faHistory,
   faSearch,
   faSync,
@@ -7,46 +29,25 @@ import {
   faUser,
   faWrench,
 } from "@fortawesome/free-solid-svg-icons";
-import { dispatchTask } from "@modules/task";
-import { createTask } from "@modules/task/utilities";
-import { useDownloadMovieSubtitles, useIsMovieActionRunning } from "apis/hooks";
-import {
-  useMovieAction,
-  useMovieById,
-  useMovieModification,
-} from "apis/hooks/movies";
-import {
-  ContentHeader,
-  ItemEditorModal,
-  LoadingIndicator,
-  MovieHistoryModal,
-  MovieUploadModal,
-  SubtitleToolModal,
-  useShowModal,
-} from "components";
-import ItemOverview from "components/ItemOverview";
-import { ManualSearchModal } from "components/modals/ManualSearchModal";
-import { RouterEmptyPath } from "pages/404";
-import React, { FunctionComponent, useCallback } from "react";
-import { Alert, Container, Row } from "react-bootstrap";
-import { Helmet } from "react-helmet";
-import { Redirect, RouteComponentProps, withRouter } from "react-router-dom";
-import { useLanguageProfileBy } from "utilities/languages";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { Container, Group, Menu, Stack } from "@mantine/core";
+import { Dropzone } from "@mantine/dropzone";
+import { useDocumentTitle } from "@mantine/hooks";
+import { showNotification } from "@mantine/notifications";
+import { isNumber } from "lodash";
+import { FunctionComponent, useCallback, useRef } from "react";
+import { Navigate, useParams } from "react-router-dom";
 import Table from "./table";
 
-interface Params {
-  id: string;
-}
-
-interface Props extends RouteComponentProps<Params> {}
-
-const MovieDetailView: FunctionComponent<Props> = ({ match }) => {
-  const id = Number.parseInt(match.params.id);
-  const { data: movie, isFetched } = useMovieById(id);
+const MovieDetailView: FunctionComponent = () => {
+  const param = useParams();
+  const id = Number.parseInt(param.id ?? "");
+  const movieQuery = useMovieById(id);
+  const { data: movie, isFetched } = movieQuery;
 
   const profile = useLanguageProfileBy(movie?.profileId);
 
-  const showModal = useShowModal();
+  const modals = useModals();
 
   const mutation = useMovieModification();
   const { mutateAsync: action } = useMovieAction();
@@ -60,6 +61,7 @@ const MovieDetailView: FunctionComponent<Props> = ({ match }) => {
         forced,
         provider,
         subtitle,
+        original_format: originalFormat,
       } = result;
       const { radarrId } = item;
 
@@ -71,122 +73,174 @@ const MovieDetailView: FunctionComponent<Props> = ({ match }) => {
           forced,
           provider,
           subtitle,
+          // eslint-disable-next-line camelcase
+          original_format: originalFormat,
         },
       });
     },
     [downloadAsync]
   );
 
+  const onDrop = useCallback(
+    (files: File[]) => {
+      if (movie && profile) {
+        modals.openContextModal(MovieUploadModal, {
+          files,
+          movie,
+        });
+      } else {
+        showNotification(
+          notification.warn(
+            "Cannot Upload Files",
+            "movie or language profile is not ready"
+          )
+        );
+      }
+    },
+    [modals, movie, profile]
+  );
+
   const hasTask = useIsMovieActionRunning();
 
+  useDocumentTitle(`${movie?.title ?? "Unknown Movie"} - Bazarr (Movies)`);
+
+  const openDropzone = useRef<VoidFunction>(null);
+
   if (isNaN(id) || (isFetched && !movie)) {
-    return <Redirect to={RouterEmptyPath}></Redirect>;
+    return <Navigate to={RouterNames.NotFound}></Navigate>;
   }
 
-  if (!movie) {
-    return <LoadingIndicator></LoadingIndicator>;
-  }
-
-  const allowEdit = movie.profileId !== undefined;
+  const allowEdit = movie?.profileId !== undefined;
 
   return (
-    <Container fluid>
-      <Helmet>
-        <title>{movie.title} - Bazarr (Movies)</title>
-      </Helmet>
-      <ContentHeader>
-        <ContentHeader.Group pos="start">
-          <ContentHeader.Button
-            icon={faSync}
-            disabled={hasTask}
-            onClick={() => {
-              const task = createTask(movie.title, id, action, {
-                action: "scan-disk",
-                radarrid: id,
-              });
-              dispatchTask("Scanning Disk...", [task], "Scanning...");
-            }}
-          >
-            Scan Disk
-          </ContentHeader.Button>
-          <ContentHeader.Button
-            icon={faSearch}
-            disabled={movie.profileId === null}
-            onClick={() => {
-              const task = createTask(movie.title, id, action, {
-                action: "search-missing",
-                radarrid: id,
-              });
-              dispatchTask("Searching subtitles...", [task], "Searching...");
-            }}
-          >
-            Search
-          </ContentHeader.Button>
-          <ContentHeader.Button
-            icon={faUser}
-            disabled={movie.profileId === null || hasTask}
-            onClick={() => showModal<Item.Movie>("manual-search", movie)}
-          >
-            Manual
-          </ContentHeader.Button>
-          <ContentHeader.Button
-            icon={faHistory}
-            onClick={() => showModal("history", movie)}
-          >
-            History
-          </ContentHeader.Button>
-          <ContentHeader.Button
-            icon={faToolbox}
-            disabled={hasTask}
-            onClick={() => showModal("tools", [movie])}
-          >
-            Tools
-          </ContentHeader.Button>
-        </ContentHeader.Group>
-
-        <ContentHeader.Group pos="end">
-          <ContentHeader.Button
-            disabled={!allowEdit || movie.profileId === null || hasTask}
-            icon={faCloudUploadAlt}
-            onClick={() => showModal("upload", movie)}
-          >
-            Upload
-          </ContentHeader.Button>
-          <ContentHeader.Button
-            icon={faWrench}
-            disabled={hasTask}
-            onClick={() => showModal("edit", movie)}
-          >
-            Edit Movie
-          </ContentHeader.Button>
-        </ContentHeader.Group>
-      </ContentHeader>
-      <Row>
-        <Alert
-          className="w-100 m-0 py-2"
-          show={hasTask}
-          style={{ borderRadius: 0 }}
-          variant="light"
+    <Container fluid px={0}>
+      <QueryOverlay result={movieQuery}>
+        <Dropzone.FullScreen
+          openRef={openDropzone}
+          active={profile !== undefined}
+          onDrop={onDrop}
         >
-          A background task is running for this movie, actions are unavailable
-        </Alert>
-      </Row>
-      <Row>
-        <ItemOverview item={movie} details={[]}></ItemOverview>
-      </Row>
-      <Row>
-        <Table movie={movie} profile={profile} disabled={hasTask}></Table>
-      </Row>
-      <ItemEditorModal modalKey="edit" mutation={mutation}></ItemEditorModal>
-      <SubtitleToolModal modalKey="tools" size="lg"></SubtitleToolModal>
-      <MovieHistoryModal modalKey="history" size="lg"></MovieHistoryModal>
-      <MovieUploadModal modalKey="upload" size="lg"></MovieUploadModal>
-      <ManualSearchModal
-        modalKey="manual-search"
-        download={download}
-      ></ManualSearchModal>
+          <DropContent></DropContent>
+        </Dropzone.FullScreen>
+        <Toolbox>
+          <Group spacing="xs">
+            <Toolbox.Button
+              icon={faSync}
+              disabled={hasTask}
+              onClick={() => {
+                if (movie) {
+                  task.create(movie.title, TaskGroup.ScanDisk, action, {
+                    action: "scan-disk",
+                    radarrid: id,
+                  });
+                }
+              }}
+            >
+              Scan Disk
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faSearch}
+              disabled={!isNumber(movie?.profileId)}
+              onClick={() => {
+                if (movie) {
+                  task.create(movie.title, TaskGroup.SearchSubtitle, action, {
+                    action: "search-missing",
+                    radarrid: id,
+                  });
+                }
+              }}
+            >
+              Search
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faUser}
+              disabled={!isNumber(movie?.profileId) || hasTask}
+              onClick={() => {
+                if (movie) {
+                  modals.openContextModal(MovieSearchModal, {
+                    item: movie,
+                    download,
+                    query: useMoviesProvider,
+                  });
+                }
+              }}
+            >
+              Manual
+            </Toolbox.Button>
+          </Group>
+          <Group spacing="xs">
+            <Toolbox.Button
+              disabled={!allowEdit || movie.profileId === null || hasTask}
+              icon={faCloudUploadAlt}
+              onClick={() => openDropzone.current?.()}
+            >
+              Upload
+            </Toolbox.Button>
+            <Toolbox.Button
+              icon={faWrench}
+              disabled={hasTask}
+              onClick={() => {
+                if (movie) {
+                  modals.openContextModal(
+                    ItemEditModal,
+                    {
+                      item: movie,
+                      mutation,
+                    },
+                    { title: movie.title }
+                  );
+                }
+              }}
+            >
+              Edit Movie
+            </Toolbox.Button>
+            <Menu>
+              <Menu.Target>
+                <Action
+                  label="More Actions"
+                  color="dark"
+                  icon={faEllipsis}
+                  disabled={hasTask}
+                />
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Item
+                  icon={<FontAwesomeIcon icon={faToolbox} />}
+                  onClick={() => {
+                    if (movie) {
+                      modals.openContextModal(SubtitleToolsModal, {
+                        payload: [movie],
+                      });
+                    }
+                  }}
+                >
+                  Mass Edit
+                </Menu.Item>
+                <Menu.Item
+                  icon={<FontAwesomeIcon icon={faHistory} />}
+                  onClick={() => {
+                    if (movie) {
+                      modals.openContextModal(MovieHistoryModal, { movie });
+                    }
+                  }}
+                >
+                  History
+                </Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
+          </Group>
+        </Toolbox>
+        <Stack>
+          <ItemOverview item={movie ?? null} details={[]}></ItemOverview>
+          <Table
+            movie={movie ?? null}
+            profile={profile}
+            disabled={hasTask}
+          ></Table>
+        </Stack>
+      </QueryOverlay>
     </Container>
   );
 };
 
-export default withRouter(MovieDetailView);
+export default MovieDetailView;

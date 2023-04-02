@@ -1,3 +1,5 @@
+import { Action, PageTable } from "@/components";
+import { useModals } from "@/modules/modals";
 import { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
   faBug,
@@ -8,10 +10,8 @@ import {
   faQuestion,
 } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ActionButton, PageTable, useShowModal } from "components";
-import { isUndefined } from "lodash";
-import React, { FunctionComponent, useCallback, useMemo } from "react";
-import { Column, Row } from "react-table";
+import { FunctionComponent, useMemo } from "react";
+import { Column } from "react-table";
 import SystemLogModal from "./modal";
 
 interface Props {
@@ -34,12 +34,6 @@ function mapTypeToIcon(type: System.LogType): IconDefinition {
 }
 
 const Table: FunctionComponent<Props> = ({ logs }) => {
-  const showModal = useShowModal();
-  const show = useCallback(
-    (row: Row<System.Log>, text: string) =>
-      showModal<string>("system-log", text),
-    [showModal]
-  );
   const columns: Column<System.Log>[] = useMemo<Column<System.Log>[]>(
     () => [
       {
@@ -55,17 +49,20 @@ const Table: FunctionComponent<Props> = ({ logs }) => {
       {
         Header: "Date",
         accessor: "timestamp",
-        className: "text-nowrap",
       },
       {
         accessor: "exception",
-        Cell: ({ row, value, update }) => {
-          if (!isUndefined(value)) {
+        Cell: ({ value }) => {
+          const modals = useModals();
+          if (value) {
             return (
-              <ActionButton
+              <Action
+                label="Detail"
                 icon={faLayerGroup}
-                onClick={() => update && update(row, value)}
-              ></ActionButton>
+                onClick={() =>
+                  modals.openContextModal(SystemLogModal, { stack: value })
+                }
+              ></Action>
             );
           } else {
             return null;
@@ -77,10 +74,9 @@ const Table: FunctionComponent<Props> = ({ logs }) => {
   );
 
   return (
-    <React.Fragment>
-      <PageTable columns={columns} data={logs} update={show}></PageTable>
-      <SystemLogModal size="xl" modalKey="system-log"></SystemLogModal>
-    </React.Fragment>
+    <>
+      <PageTable columns={columns} data={logs}></PageTable>
+    </>
   );
 };
 

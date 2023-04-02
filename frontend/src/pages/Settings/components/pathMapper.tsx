@@ -1,18 +1,20 @@
+import { Action, FileBrowser, SimpleTable } from "@/components";
+import { useArrayAction } from "@/utilities";
 import { faArrowCircleRight, faTrash } from "@fortawesome/free-solid-svg-icons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { ActionButton, FileBrowser, SimpleTable } from "components";
-import { capitalize, isArray, isBoolean } from "lodash";
-import React, { FunctionComponent, useCallback, useMemo } from "react";
-import { Button } from "react-bootstrap";
-import { Column, TableUpdater } from "react-table";
+import { Button } from "@mantine/core";
+import { capitalize } from "lodash";
+import { FunctionComponent, useCallback, useMemo } from "react";
+import { Column } from "react-table";
 import {
   moviesEnabledKey,
   pathMappingsKey,
   pathMappingsMovieKey,
   seriesEnabledKey,
 } from "../keys";
-import { Message } from "./forms";
-import { useExtract, useLatest, useSingleUpdate } from "./hooks";
+import { useFormActions } from "../utilities/FormValues";
+import { useSettingValue } from "../utilities/hooks";
+import { Message } from "./Message";
 
 type SupportType = "sonarr" | "radarr";
 
@@ -43,69 +45,58 @@ interface TableProps {
 
 export const PathMappingTable: FunctionComponent<TableProps> = ({ type }) => {
   const key = getSupportKey(type);
-  const items = useLatest<[string, string][]>(key, isArray);
+  const items = useSettingValue<[string, string][]>(key);
 
   const enabledKey = getEnabledKey(type);
-  const enabled = useExtract<boolean>(enabledKey, isBoolean);
+  const enabled = useSettingValue<boolean>(enabledKey, { original: true });
 
-  const update = useSingleUpdate();
+  const { setValue } = useFormActions();
 
   const updateRow = useCallback(
     (newItems: PathMappingItem[]) => {
-      update(
+      setValue(
         newItems.map((v) => [v.from, v.to]),
         key
       );
     },
-    [key, update]
+    [key, setValue]
   );
 
   const addRow = useCallback(() => {
     if (items) {
       const newItems = [...items, ["", ""]];
-      update(newItems, key);
+      setValue(newItems, key);
     }
-  }, [items, key, update]);
+  }, [items, key, setValue]);
 
   const data = useMemo<PathMappingItem[]>(
     () => items?.map((v) => ({ from: v[0], to: v[1] })) ?? [],
     [items]
   );
 
-  const updateCell = useCallback<TableUpdater<PathMappingItem>>(
-    (row, item?: PathMappingItem) => {
-      const newItems = [...data];
-      if (item) {
-        newItems[row.index] = item;
-      } else {
-        newItems.splice(row.index, 1);
-      }
-      updateRow(newItems);
-    },
-    [data, updateRow]
-  );
+  const action = useArrayAction<PathMappingItem>((fn) => {
+    updateRow(fn(data));
+  });
 
   const columns = useMemo<Column<PathMappingItem>[]>(
     () => [
       {
         Header: capitalize(type),
         accessor: "from",
-        Cell: ({ value, row, update }) => (
-          <FileBrowser
-            drop="up"
-            type={type}
-            defaultValue={value}
-            onChange={(path) => {
-              const newItem = { ...row.original };
-              newItem.from = path;
-              update && update(row, newItem);
-            }}
-          ></FileBrowser>
-        ),
+        Cell: ({ value, row: { original, index } }) => {
+          return (
+            <FileBrowser
+              type={type}
+              defaultValue={value}
+              onChange={(path) => {
+                action.mutate(index, { ...original, from: path });
+              }}
+            ></FileBrowser>
+          );
+        },
       },
       {
         id: "arrow",
-        className: "text-center",
         Cell: () => (
           <FontAwesomeIcon icon={faArrowCircleRight}></FontAwesomeIcon>
         ),
@@ -113,49 +104,47 @@ export const PathMappingTable: FunctionComponent<TableProps> = ({ type }) => {
       {
         Header: "Bazarr",
         accessor: "to",
-        Cell: ({ value, row, update }) => (
-          <FileBrowser
-            drop="up"
-            defaultValue={value}
-            type="bazarr"
-            onChange={(path) => {
-              const newItem = { ...row.original };
-              newItem.to = path;
-              update && update(row, newItem);
-            }}
-          ></FileBrowser>
-        ),
+        Cell: ({ value, row: { original, index } }) => {
+          return (
+            <FileBrowser
+              defaultValue={value}
+              type="bazarr"
+              onChange={(path) => {
+                action.mutate(index, { ...original, to: path });
+              }}
+            ></FileBrowser>
+          );
+        },
       },
       {
         id: "action",
         accessor: "to",
-        Cell: ({ row, update }) => (
-          <ActionButton
-            icon={faTrash}
-            onClick={() => {
-              update && update(row);
-            }}
-          ></ActionButton>
-        ),
+        Cell: ({ row: { index } }) => {
+          return (
+            <Action
+              label="Remove"
+              icon={faTrash}
+              onClick={() => action.remove(index)}
+            ></Action>
+          );
+        },
       },
     ],
-    [type]
+    [action, type]
   );
 
   if (enabled) {
     return (
-      <React.Fragment>
+      <>
         <SimpleTable
-          emptyText="No Mapping"
-          responsive={false}
+          tableStyles={{ emptyText: "No mapping" }}
           columns={columns}
           data={data}
-          update={updateCell}
         ></SimpleTable>
-        <Button block variant="light" onClick={addRow}>
+        <Button fullWidth color="light" onClick={addRow}>
           Add
         </Button>
-      </React.Fragment>
+      </>
     );
   } else {
     return (

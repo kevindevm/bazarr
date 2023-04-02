@@ -1,5 +1,5 @@
-import React, { forwardRef, useEffect, useRef } from "react";
-import { Form } from "react-bootstrap";
+import { Checkbox as MantineCheckbox } from "@mantine/core";
+import { forwardRef, useEffect, useRef } from "react";
 import {
   CellProps,
   Column,
@@ -41,21 +41,16 @@ const Checkbox = forwardRef<
   }, [resolvedRef, indeterminate, checked, disabled]);
 
   return (
-    <Form.Check
-      custom
+    <MantineCheckbox
+      key={idIn}
       disabled={disabled}
-      id={idIn}
       ref={resolvedRef}
       {...rest}
-    ></Form.Check>
+    ></MantineCheckbox>
   );
 });
 
 function useCustomSelection<T extends object>(hooks: Hooks<T>) {
-  hooks.visibleColumnsDeps.push((deps, { instance }) => [
-    ...deps,
-    instance.isSelecting,
-  ]);
   hooks.visibleColumns.push(visibleColumns);
   hooks.useInstance.push(useInstance);
 }
@@ -68,7 +63,6 @@ function useInstance<T extends object>(instance: TableInstance<T>) {
     rows,
     onSelect,
     canSelect,
-    isSelecting,
     state: { selectedRowIds },
   } = instance;
 
@@ -76,18 +70,16 @@ function useInstance<T extends object>(instance: TableInstance<T>) {
 
   useEffect(() => {
     // Performance
-    if (isSelecting) {
-      let items = Object.keys(selectedRowIds).flatMap(
-        (v) => rows.find((n) => n.id === v)?.original ?? []
-      );
+    let items = Object.keys(selectedRowIds).flatMap(
+      (v) => rows.find((n) => n.id === v)?.original ?? []
+    );
 
-      if (canSelect) {
-        items = items.filter((v) => canSelect(v));
-      }
-
-      onSelect && onSelect(items);
+    if (canSelect) {
+      items = items.filter((v) => canSelect(v));
     }
-  }, [selectedRowIds, onSelect, rows, isSelecting, canSelect]);
+
+    onSelect && onSelect(items);
+  }, [selectedRowIds, onSelect, rows, canSelect]);
 }
 
 function visibleColumns<T extends object>(
@@ -95,31 +87,27 @@ function visibleColumns<T extends object>(
   meta: MetaBase<T>
 ): Column<T>[] {
   const { instance } = meta;
-  if (instance.isSelecting) {
-    const checkbox: Column<T> = {
-      id: checkboxId,
-      Header: ({ getToggleAllRowsSelectedProps }: HeaderProps<any>) => (
+  const checkbox: Column<T> = {
+    id: checkboxId,
+    Header: ({ getToggleAllRowsSelectedProps }: HeaderProps<T>) => (
+      <Checkbox
+        idIn="table-header-selection"
+        {...getToggleAllRowsSelectedProps()}
+      ></Checkbox>
+    ),
+    Cell: ({ row }: CellProps<T>) => {
+      const canSelect = instance.canSelect;
+      const disabled = (canSelect && !canSelect(row.original)) ?? false;
+      return (
         <Checkbox
-          idIn="table-header-selection"
-          {...getToggleAllRowsSelectedProps()}
+          idIn={`table-cell-${row.index}`}
+          disabled={disabled}
+          {...row.getToggleRowSelectedProps()}
         ></Checkbox>
-      ),
-      Cell: ({ row }: CellProps<any>) => {
-        const canSelect = instance.canSelect;
-        const disabled = (canSelect && !canSelect(row.original)) ?? false;
-        return (
-          <Checkbox
-            idIn={`table-cell-${row.index}`}
-            disabled={disabled}
-            {...row.getToggleRowSelectedProps()}
-          ></Checkbox>
-        );
-      },
-    };
-    return [checkbox, ...columns.filter((v) => v.selectHide !== true)];
-  } else {
-    return columns;
-  }
+      );
+    },
+  };
+  return [checkbox, ...columns];
 }
 
 export default useCustomSelection;

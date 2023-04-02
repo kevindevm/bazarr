@@ -1,9 +1,9 @@
-import { faSearch, faTrash } from "@fortawesome/free-solid-svg-icons";
-import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { useEpisodeSubtitleModification } from "apis/hooks";
-import { AsyncButton, LanguageText } from "components";
-import React, { FunctionComponent } from "react";
-import { Badge } from "react-bootstrap";
+import { useEpisodeSubtitleModification } from "@/apis/hooks";
+import Language from "@/components/bazarr/Language";
+import SubtitleToolsMenu from "@/components/SubtitleToolsMenu";
+import { task, TaskGroup } from "@/modules/task";
+import { Badge, MantineColor, Tooltip } from "@mantine/core";
+import { FunctionComponent, useMemo, useState } from "react";
 
 interface Props {
   seriesId: number;
@@ -12,58 +12,97 @@ interface Props {
   subtitle: Subtitle;
 }
 
-export const SubtitleAction: FunctionComponent<Props> = ({
+export const Subtitle: FunctionComponent<Props> = ({
   seriesId,
   episodeId,
-  missing,
+  missing = false,
   subtitle,
 }) => {
-  const { hi, forced } = subtitle;
+  const { remove, download } = useEpisodeSubtitleModification();
 
-  const path = subtitle.path;
+  const [opened, setOpen] = useState(false);
 
-  const { download, remove } = useEpisodeSubtitleModification();
+  const disabled = subtitle.path === null;
 
-  if (missing || path) {
-    return (
-      <AsyncButton
-        promise={() => {
-          if (missing) {
-            return download.mutateAsync({
+  const color: MantineColor | undefined = useMemo(() => {
+    if (opened && !disabled) {
+      return "cyan";
+    } else if (missing) {
+      return "yellow";
+    } else if (disabled) {
+      return "gray";
+    }
+  }, [disabled, missing, opened]);
+
+  const selections = useMemo<FormType.ModifySubtitle[]>(() => {
+    const list: FormType.ModifySubtitle[] = [];
+
+    if (subtitle.path) {
+      list.push({
+        id: episodeId,
+        type: "episode",
+        language: subtitle.code2,
+        path: subtitle.path,
+      });
+    }
+
+    return list;
+  }, [episodeId, subtitle.code2, subtitle.path]);
+
+  const ctx = (
+    <Badge color={color}>
+      <Language.Text value={subtitle} long={false}></Language.Text>
+    </Badge>
+  );
+
+  if (disabled) {
+    return <Tooltip.Floating label="Embedded Subtitle">{ctx}</Tooltip.Floating>;
+  }
+
+  return (
+    <SubtitleToolsMenu
+      menu={{
+        trigger: "hover",
+        onOpen: () => setOpen(true),
+        onClose: () => setOpen(false),
+      }}
+      selections={selections}
+      onAction={(action) => {
+        if (action === "search") {
+          task.create(
+            subtitle.name,
+            TaskGroup.SearchSubtitle,
+            download.mutateAsync,
+            {
               seriesId,
               episodeId,
               form: {
-                hi,
-                forced,
                 language: subtitle.code2,
+                hi: subtitle.hi,
+                forced: subtitle.forced,
               },
-            });
-          } else if (path) {
-            return remove.mutateAsync({
+            }
+          );
+        } else if (action === "delete" && subtitle.path) {
+          task.create(
+            subtitle.name,
+            TaskGroup.DeleteSubtitle,
+            remove.mutateAsync,
+            {
               seriesId,
               episodeId,
-              form: { hi, forced, path, language: subtitle.code2 },
-            });
-          } else {
-            return null;
-          }
-        }}
-        as={Badge}
-        className="mr-1"
-        variant={missing ? "primary" : "secondary"}
-      >
-        <LanguageText className="pr-1" text={subtitle}></LanguageText>
-        <FontAwesomeIcon
-          size="sm"
-          icon={missing ? faSearch : faTrash}
-        ></FontAwesomeIcon>
-      </AsyncButton>
-    );
-  } else {
-    return (
-      <Badge className="mr-1" variant="secondary">
-        <LanguageText text={subtitle} long={false}></LanguageText>
-      </Badge>
-    );
-  }
+              form: {
+                language: subtitle.code2,
+                hi: subtitle.hi,
+                forced: subtitle.forced,
+                path: subtitle.path,
+              },
+            }
+          );
+        }
+      }}
+    >
+      {ctx}
+    </SubtitleToolsMenu>
+  );
 };
